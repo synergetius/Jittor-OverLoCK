@@ -1,0 +1,3 @@
+cd /mnt/d/programming/Jittor-OverLoCK
+
+conda activate jittor_env
