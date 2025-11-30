@@ -287,7 +287,233 @@ class RepConvBlock(Module):
             x = self.forward_features(x)
         
         return x
+class DynamicConvBlock(nn.Module):
+    def __init__(self,
+                 dim=64,
+                 ctx_dim=32,
+                 kernel_size=7,
+                 smk_size=5,
+                 num_heads=2,
+                 mlp_ratio=4,
+                 ls_init_value=None,
+                 res_scale=False,
+                 drop_path=0,
+                 norm_layer=LayerNorm2d,
+                 is_first=False,
+                 is_last=False,
+                 use_gemm=False,
+                 deploy=False,
+                 use_checkpoint=False,
+                 **kwargs):
+        
+        super().__init__()
+        
+        ctx_dim = ctx_dim // 4
+        out_dim = dim + ctx_dim
+        mlp_dim = int(dim*mlp_ratio)
+        self.kernel_size = kernel_size
+        self.res_scale = res_scale
+        self.use_gemm = use_gemm
+        self.smk_size = smk_size
+        self.num_heads = num_heads * 2
+        head_dim = dim // self.num_heads
+        self.scale = head_dim ** -0.5
+        self.is_first = is_first
+        self.is_last = is_last
+        self.use_checkpoint = use_checkpoint
 
+        if not is_first:
+            self.x_scale = LayerScale(ctx_dim, init_value=1)
+            self.h_scale = LayerScale(ctx_dim, init_value=1)
+        
+        self.dwconv1 = ResDWConv(out_dim, kernel_size=3)
+        self.norm1 = norm_layer(out_dim)
+        
+        self.fusion = nn.Sequential(
+            nn.Conv2d(out_dim, out_dim, kernel_size=3, padding=1, groups=out_dim),
+            nn.BatchNorm2d(out_dim),
+            nn.GELU(),
+            nn.Conv2d(out_dim, dim, kernel_size=1),
+            GRN(dim),
+        )
+        
+        self.weight_query = nn.Sequential(
+            nn.Conv2d(dim, dim//2, kernel_size=1, bias=False),
+            nn.BatchNorm2d(dim//2),
+        )
+         
+        self.weight_key = nn.Sequential(
+            nn.AdaptiveAvgPool2d(7),
+            nn.Conv2d(ctx_dim, dim//2, kernel_size=1, bias=False),
+            nn.BatchNorm2d(dim//2),
+        )
+        
+        self.weight_proj = nn.Conv2d(49, kernel_size**2 + smk_size**2, kernel_size=1)
+        
+        self.dyconv_proj = nn.Sequential(
+            nn.Conv2d(dim, dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(dim),
+        )
+        
+        self.lepe = nn.Sequential(
+            DilatedReparamBlock(dim, kernel_size=kernel_size, deploy=deploy, use_sync_bn=False, attempt_use_lk_impl=use_gemm),
+            nn.BatchNorm2d(dim),
+        )
+        
+        self.se_layer = SEModule(dim)
+        
+        self.gate = nn.Sequential(
+            nn.Conv2d(dim, dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(dim),
+            nn.SiLU(),
+        )
+
+        self.proj = nn.Sequential(
+            nn.BatchNorm2d(dim),
+            nn.Conv2d(dim, out_dim, kernel_size=1),
+        )
+        
+        self.dwconv2 = ResDWConv(out_dim, kernel_size=3)
+        self.norm2 = norm_layer(out_dim)
+        
+        self.mlp = nn.Sequential(
+            nn.Conv2d(out_dim, mlp_dim, kernel_size=1),
+            nn.GELU(),
+            ResDWConv(mlp_dim, kernel_size=3),
+            GRN(mlp_dim),
+            nn.Conv2d(mlp_dim, out_dim, kernel_size=1),
+        )
+        
+        self.ls1 = LayerScale(out_dim, init_value=ls_init_value) if ls_init_value is not None else nn.Identity()
+        self.ls2 = LayerScale(out_dim, init_value=ls_init_value) if ls_init_value is not None else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
+        
+        self.get_rpb()
+
+
+    def get_rpb(self):
+        self.rpb_size1 = 2 * self.smk_size - 1
+        self.rpb1 = jittor.empty(self.num_heads, self.rpb_size1, self.rpb_size1)
+        self.rpb_size2 = 2 * self.kernel_size - 1
+        self.rpb2 = jittor.empty(self.num_heads, self.rpb_size2, self.rpb_size2)
+        jittor.init.zero_(self.rpb1)
+        jittor.init.zero_(self.rpb2)
+    
+        
+    #@torch.no_grad()
+    @jittor.no_grad()
+    def generate_idx(self, kernel_size):
+        rpb_size = 2 * kernel_size - 1
+        idx_h = torch.arange(0, kernel_size)
+        idx_w = torch.arange(0, kernel_size)
+        idx_k = ((idx_h.unsqueeze(-1) * rpb_size) + idx_w).view(-1)
+        return (idx_h, idx_w, idx_k)
+    
+
+    def apply_rpb(self, attn, rpb, height, width, kernel_size, idx_h, idx_w, idx_k):
+        """
+        RPB implementation directly borrowed from https://tinyurl.com/mrbub4t3
+        """
+        num_repeat_h = torch.ones(kernel_size, dtype=torch.long)
+        num_repeat_w = torch.ones(kernel_size, dtype=torch.long)
+        num_repeat_h[kernel_size//2] = height - (kernel_size-1)
+        num_repeat_w[kernel_size//2] = width - (kernel_size-1)
+        bias_hw = (idx_h.repeat_interleave(num_repeat_h).unsqueeze(-1) * (2*kernel_size-1)) + idx_w.repeat_interleave(num_repeat_w)
+        bias_idx = bias_hw.unsqueeze(-1) + idx_k
+        bias_idx = bias_idx.reshape(-1, int(kernel_size**2))
+        bias_idx = torch.flip(bias_idx, [0])
+        rpb = torch.flatten(rpb, 1, 2)[:, bias_idx]
+        rpb = rpb.reshape(1, int(self.num_heads), int(height), int(width), int(kernel_size**2))
+        return attn + rpb
+    
+
+    def _forward_inner(self, x, h_x, h_r):
+        input_resoltion = x.shape[2:]   
+        B, C, H, W = x.shape
+        B, C_h, H_h, W_h = h_x.shape
+        
+        if not self.is_first:
+            h_x = self.x_scale(h_x) + self.h_scale(h_r)
+
+        x_f = torch.cat([x, h_x], dim=1)
+        x_f = self.dwconv1(x_f)
+        identity = x_f
+        x_f = self.norm1(x_f)
+        x = self.fusion(x_f)
+        gate = self.gate(x)
+        lepe = self.lepe(x)
+
+        is_pad = False
+        if min(H, W) < self.kernel_size:
+            is_pad = True
+            if H < W:
+                size = (self.kernel_size, int(self.kernel_size / H * W))
+            else:
+                size = (int(self.kernel_size / W * H), self.kernel_size)
+            x = F.interpolate(x, size=size, mode='bilinear', align_corners=False)
+            x_f = F.interpolate(x_f, size=size, mode='bilinear', align_corners=False)
+            H, W = size
+
+        query, key = torch.split(x_f, split_size_or_sections=[C, C_h], dim=1)
+        query = self.weight_query(query) * self.scale
+        key = self.weight_key(key)
+        query = rearrange(query, 'b (g c) h w -> b g c (h w)', g=self.num_heads)
+        key = rearrange(key, 'b (g c) h w -> b g c (h w)', g=self.num_heads)
+        weight = einsum(query, key, 'b g c n, b g c l -> b g n l')
+        weight = rearrange(weight, 'b g n l -> b l g n').contiguous()
+        weight = self.weight_proj(weight)
+        weight = rearrange(weight, 'b l g (h w) -> b g h w l', h=H, w=W)
+
+        attn1, attn2 = torch.split(weight, split_size_or_sections=[self.smk_size**2, self.kernel_size**2], dim=-1)
+        rpb1_idx = self.generate_idx(self.smk_size)
+        rpb2_idx = self.generate_idx(self.kernel_size)
+        attn1 = self.apply_rpb(attn1, self.rpb1, H, W, self.smk_size, *rpb1_idx)
+        attn2 = self.apply_rpb(attn2, self.rpb2, H, W, self.kernel_size, *rpb2_idx)
+        attn1 = torch.softmax(attn1, dim=-1)
+        attn2 = torch.softmax(attn2, dim=-1)
+        value = rearrange(x, 'b (m g c) h w -> m b g h w c', m=2, g=self.num_heads)
+
+        x1 = na2d_av(attn1, value[0], kernel_size=self.smk_size)
+        x2 = na2d_av(attn2, value[1], kernel_size=self.kernel_size)
+
+        x = torch.cat([x1, x2], dim=1)
+        x = rearrange(x, 'b g h w c -> b (g c) h w', h=H, w=W)
+
+        if is_pad:
+            x = F.adaptive_avg_pool2d(x, input_resoltion)
+
+        x = self.dyconv_proj(x)
+
+        x = x + lepe
+        x = self.se_layer(x)
+
+        x = gate * x
+        x = self.proj(x)
+
+        if self.res_scale:
+            x = self.ls1(identity) + self.drop_path(x)
+        else:
+            x = identity + self.drop_path(self.ls1(x))
+        
+        x = self.dwconv2(x)
+         
+        if self.res_scale:
+            x = self.ls2(x) + self.drop_path(self.mlp(self.norm2(x)))
+        else:
+            x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
+
+        if self.is_last:
+            return (x, None)
+        else:
+            l_x, h_x = torch.split(x, split_size_or_sections=[C, C_h], dim=1)
+            return (l_x, h_x)
+    
+    def forward(self, x, h_x, h_r):
+        if self.use_checkpoint and x.requires_grad:
+            x = checkpoint(self._forward_inner, x, h_x, h_r, use_reentrant=False)
+        else:
+            x = self._forward_inner(x, h_x, h_r)
+        return x
 class OverLoCK(Module):
     def __init__(
          self, 
@@ -461,9 +687,9 @@ class OverLoCK(Module):
         )
         
         self.apply(self._init_weights)
-        
-        if torch.distributed.is_initialized():
-            self = nn.SyncBatchNorm.convert_sync_batchnorm(self)
+        ##### 暂不考虑分布式训练
+        #if torch.distributed.is_initialized():
+        #    self = nn.SyncBatchNorm.convert_sync_batchnorm(self)
     def _init_weights(self, m):
         if isinstance(m, (nn.Linear, nn.Conv2d, nn.Conv1d)):
             nn.init.trunc_normal_(m.weight, std=.02)
@@ -534,7 +760,7 @@ class OverLoCK(Module):
 
         return (x, ctx_cls)
 
-    def forward(self, x):
+    def execute(self, x):
         
         x, ctx = self.forward_features(x)
         x = self.head(x).flatten(1) #main 分类头计算
@@ -544,6 +770,19 @@ class OverLoCK(Module):
             return dict(main=x, aux=ctx)
         
         return x
+def _cfg(url=None, **kwargs):
+    return {
+        'url': url,
+        'num_classes': 1000,
+        'input_size': (3, 224, 224),
+        'crop_pct': 0.9,
+        'interpolation': 'bicubic',  # 'bilinear' or 'bicubic'
+        #'mean': timm.data.IMAGENET_DEFAULT_MEAN,
+        #'std': timm.data.IMAGENET_DEFAULT_STD,
+        'classifier': 'classifier',
+        **kwargs,
+    }
+
 def overlock_xt(pretrained=False, pretrained_cfg=None, **kwargs):
     
     model = OverLoCK(
