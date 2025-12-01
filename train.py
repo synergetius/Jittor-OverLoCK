@@ -9,6 +9,7 @@ from collections import OrderedDict
 from contextlib import suppress
 
 from jittor.dataset import DataLoader, Dataset
+from jittor.transform import Compose, Resize, RandomCrop, ToTensor, RandomHorizontalFlip
 from jittor import nn
 import jittor
 import models
@@ -93,11 +94,21 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args):
             print(f"训练第{i+1}个 batch 时出错: {e}")
             raise
 def main(args):
+    def custom_normalize(tensor):
+        mean = jittor.array([0.485, 0.456, 0.406]).view(3,1,1)
+        std = jittor.array([0.229, 0.224, 0.225]).view(3,1,1) ###### 这里执行通道维度转换
+        return (tensor - mean) / std
+    transform = Compose([
+        Resize(256),
+        RandomCrop(224),
+        RandomHorizontalFlip(),  
+        ToTensor(),
+        custom_normalize
+    ])
     train_dataset = TinyImageNet(
         root = '/mnt/d/data/tiny-imagenet-200',
-        #root = './data/tiny-imagenet-200',
         train = True,
-        #transform = transform,
+        transform = transform,
         debug = True
     )
     train_loader = train_dataset.set_attrs(batch_size = args.batch_size, shuffle = True) 

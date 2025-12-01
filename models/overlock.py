@@ -1,6 +1,8 @@
 import jittor
 from jittor import Module
 from jittor import nn
+from jittor.einops import rearrange
+from jittor.linalg import einsum
 import numpy as np
 def get_conv2d(in_channels, 
                out_channels, 
@@ -76,7 +78,7 @@ class SEModule(Module):
             out_act(),
         )
         
-    def forward(self, x):
+    def execute(self, x):
         x = x * self.proj(x)
         return x
 class LayerScale(Module):
@@ -85,15 +87,15 @@ class LayerScale(Module):
         self.weight = jittor.ones(dim, 1, 1, 1)*init_value
         self.bias = jittor.zeros(dim)
 
-    def forward(self, x):
+    def execute(self, x):
         x = nn.conv2d(x, weight=self.weight, bias=self.bias, groups=x.shape[1])
         return x
 class LayerNorm2d(nn.LayerNorm):
     def __init__(self, dim):
         super().__init__(normalized_shape=dim, eps=1e-6)
-    def forward(self, x):
+    def execute(self, x):
         x = rearrange(x, 'b c h w -> b h w c')
-        x = super().forward(x)
+        x = super().execute(x)
         x = rearrange(x, 'b h w c -> b c h w')
         return x.contiguous()
 class GRN(nn.Module):
@@ -110,8 +112,8 @@ class GRN(nn.Module):
         if self.use_bias:
             self.beta = jittor.zeros(1, dim, 1, 1)
 
-    def forward(self, x):
-        Gx = torch.norm(x, p=2, dim=(-1, -2), keepdim=True)
+    def execute(self, x):
+        Gx = jittor.norm(x, p=2, dim=(-1, -2), keepdim=True)
         Nx = Gx / (Gx.mean(dim=1, keepdim=True) + 1e-6)
         # 对空间维度求2-范数，再对通道求平均后，作为分母执行归一化
         if self.use_bias:
@@ -169,7 +171,7 @@ class DilatedReparamBlock(Module):
                                            bias=False))
                 self.__setattr__('dil_bn_k{}_{}'.format(k, r), get_bn(channels, use_sync_bn=use_sync_bn))
 
-    def forward(self, x):
+    def execute(self, x):
         if not hasattr(self, 'origin_bn'): # deploy mode
             return self.lk_origin(x)
         out = self.origin_bn(self.lk_origin(x))
@@ -265,21 +267,32 @@ class RepConvBlock(Module):
         )
 
         self.ls = LayerScale(dim, init_value=ls_init_value) if ls_init_value is not None else nn.Identity()
+        self.ls_init_value = ls_init_value
         # layerscale使用1x1 conv实现，输入维度为dim，输出维度为1
         
     def forward_features(self, x):
         
         x = self.dwconv(x)
         # 应该是残差连接与layerscale的两种不同的组合方式
-        if self.res_scale: 
-            x = self.ls(x) + self.proj(x)
+        if self.res_scale:
+            print("p1")
+            if self.ls_init_value is not None:
+                print(x.shape, self.ls.weight.shape)
+            y = self.ls(x)
+            print("p11")
+            z = self.proj(x)
+            print("p12")
+            #print(x.shape, y.shape, z.shape)
+            x = y + z
+           
         else:
+            print("p2")
             drop_path = self.proj[-1]
             x = x + drop_path(self.ls(self.proj[:-1](x)))
-
+        print("p3")
         return x
     
-    def forward(self, x):
+    def execute(self, x):
         # 加了断点，应该是为了调试方便
         if self.use_checkpoint and x.requires_grad:
             x = checkpoint(self.forward_features, x, use_reentrant=False)
@@ -329,7 +342,7 @@ class DynamicConvBlock(nn.Module):
         self.dwconv1 = ResDWConv(out_dim, kernel_size=3)
         self.norm1 = norm_layer(out_dim)
         
-        self.fusion = nn.Sequential(
+        self.fusion = nn.Sequential( ##### DynamicBlock 中的ConvFFN ？？
             nn.Conv2d(out_dim, out_dim, kernel_size=3, padding=1, groups=out_dim),
             nn.BatchNorm2d(out_dim),
             nn.GELU(),
@@ -348,7 +361,7 @@ class DynamicConvBlock(nn.Module):
             nn.BatchNorm2d(dim//2),
         )
         
-        self.weight_proj = nn.Conv2d(49, kernel_size**2 + smk_size**2, kernel_size=1)
+        self.weight_proj = nn.Conv2d(49, kernel_size**2 + smk_size**2, kernel_size=1) # 49 = 7 x 7 = S x S
         
         self.dyconv_proj = nn.Sequential(
             nn.Conv2d(dim, dim, kernel_size=1, bias=False),
@@ -358,7 +371,7 @@ class DynamicConvBlock(nn.Module):
         self.lepe = nn.Sequential(
             DilatedReparamBlock(dim, kernel_size=kernel_size, deploy=deploy, use_sync_bn=False, attempt_use_lk_impl=use_gemm),
             nn.BatchNorm2d(dim),
-        )
+        ) ######
         
         self.se_layer = SEModule(dim)
         
@@ -404,8 +417,8 @@ class DynamicConvBlock(nn.Module):
     @jittor.no_grad()
     def generate_idx(self, kernel_size):
         rpb_size = 2 * kernel_size - 1
-        idx_h = torch.arange(0, kernel_size)
-        idx_w = torch.arange(0, kernel_size)
+        idx_h = jittor.arange(0, kernel_size)
+        idx_w = jittor.arange(0, kernel_size)
         idx_k = ((idx_h.unsqueeze(-1) * rpb_size) + idx_w).view(-1)
         return (idx_h, idx_w, idx_k)
     
@@ -414,10 +427,12 @@ class DynamicConvBlock(nn.Module):
         """
         RPB implementation directly borrowed from https://tinyurl.com/mrbub4t3
         """
-        num_repeat_h = torch.ones(kernel_size, dtype=torch.long)
-        num_repeat_w = torch.ones(kernel_size, dtype=torch.long)
+        num_repeat_h = jittor.ones(kernel_size, dtype=jittor.int64)
+        num_repeat_w = jittor.ones(kernel_size, dtype=jittor.int64)
         num_repeat_h[kernel_size//2] = height - (kernel_size-1)
         num_repeat_w[kernel_size//2] = width - (kernel_size-1)
+        # jittor的repeat_interleave的repeats似乎只支持int，不支持对每个元素说明特定重复次数
+        # 得先弄清楚generate_idx & apply_rpb 这两个函数在做什么
         bias_hw = (idx_h.repeat_interleave(num_repeat_h).unsqueeze(-1) * (2*kernel_size-1)) + idx_w.repeat_interleave(num_repeat_w)
         bias_idx = bias_hw.unsqueeze(-1) + idx_k
         bias_idx = bias_idx.reshape(-1, int(kernel_size**2))
@@ -435,48 +450,64 @@ class DynamicConvBlock(nn.Module):
         if not self.is_first:
             h_x = self.x_scale(h_x) + self.h_scale(h_r)
 
-        x_f = torch.cat([x, h_x], dim=1)
+        x_f = jittor.cat([x, h_x], dim=1)
+        #res dwconv
         x_f = self.dwconv1(x_f)
+        # 后面这个残差块
         identity = x_f
+        # GDSA
         x_f = self.norm1(x_f)
         x = self.fusion(x_f)
-        gate = self.gate(x)
-        lepe = self.lepe(x)
+        gate = self.gate(x) ###### GDSA的gate分支
+        lepe = self.lepe(x) ###### 包含一个扩张重参数块和一个batchnorm
 
         is_pad = False
         if min(H, W) < self.kernel_size:
+            # 如果图像过小，就通过插值放大，确保最小的边长都不小于核的边长
             is_pad = True
             if H < W:
                 size = (self.kernel_size, int(self.kernel_size / H * W))
             else:
                 size = (int(self.kernel_size / W * H), self.kernel_size)
-            x = F.interpolate(x, size=size, mode='bilinear', align_corners=False)
-            x_f = F.interpolate(x_f, size=size, mode='bilinear', align_corners=False)
+            x = nn.interpolate(x, size=size, mode='bilinear', align_corners=False)
+            x_f = nn.interpolate(x_f, size=size, mode='bilinear', align_corners=False)
             H, W = size
-
-        query, key = torch.split(x_f, split_size_or_sections=[C, C_h], dim=1)
+        # contmix
+        query, key = jittor.split(x_f, split_size=[C, C_h], dim=1)
+        # 分别加工query和key
         query = self.weight_query(query) * self.scale
-        key = self.weight_key(key)
+        key = self.weight_key(key) ## 这里面包含了adaptive pooling
+        # 分组
         query = rearrange(query, 'b (g c) h w -> b g c (h w)', g=self.num_heads)
         key = rearrange(key, 'b (g c) h w -> b g c (h w)', g=self.num_heads)
-        weight = einsum(query, key, 'b g c n, b g c l -> b g n l')
+        # 点积计算注意力
+        weight = einsum('b g c n, b g c l -> b g n l', query, key) # g 即分组数，n = H*W，l = S*S
         weight = rearrange(weight, 'b g n l -> b l g n').contiguous()
+        # 用1x1卷积，将weight的通道数l(=7x7=49)投影成大核与小核权重点数量之和。注意这里仍然保留了H和W
         weight = self.weight_proj(weight)
         weight = rearrange(weight, 'b l g (h w) -> b g h w l', h=H, w=W)
-
-        attn1, attn2 = torch.split(weight, split_size_or_sections=[self.smk_size**2, self.kernel_size**2], dim=-1)
+        # 最后一个维度拆分为两种不同大小的核。注意这里仍然保留了H和W（这两个维度来自前面Q的计算）
+        attn1, attn2 = jittor.split(weight, split_size=[self.smk_size**2, self.kernel_size**2], dim=-1)
+        # 生成动态核
+        # rpb1_idx, rpb2_idx应该是动态核的某些索引信息
         rpb1_idx = self.generate_idx(self.smk_size)
         rpb2_idx = self.generate_idx(self.kernel_size)
+        # 这里应该是在结合索引信息生成核权重
         attn1 = self.apply_rpb(attn1, self.rpb1, H, W, self.smk_size, *rpb1_idx)
         attn2 = self.apply_rpb(attn2, self.rpb2, H, W, self.kernel_size, *rpb2_idx)
-        attn1 = torch.softmax(attn1, dim=-1)
-        attn2 = torch.softmax(attn2, dim=-1)
+        # attn1, attn2 shape: (B, g, H, W, K**2)
+        # 这里的attn随着空间位置平移而发生变化，是因为引入了RPB（从而让不同位置具有基于相对位置计算得到的特定偏置）
+        # 所以它不是简单的传统卷积，需要注意
+        attn1 = nn.softmax(attn1, dim=-1)
+        attn2 = nn.softmax(attn2, dim=-1)
         value = rearrange(x, 'b (m g c) h w -> m b g h w c', m=2, g=self.num_heads)
-
+        # value[i] shape: (B, g, H, W, C)
+        # 使用生成的核权重进行卷积
+        ########## 原文使用了natten的实现，这里可能得自己重新写
         x1 = na2d_av(attn1, value[0], kernel_size=self.smk_size)
         x2 = na2d_av(attn2, value[1], kernel_size=self.kernel_size)
-
-        x = torch.cat([x1, x2], dim=1)
+        # 合并大小核卷积结果
+        x = jittor.cat([x1, x2], dim=1)
         x = rearrange(x, 'b g h w c -> b (g c) h w', h=H, w=W)
 
         if is_pad:
@@ -505,10 +536,10 @@ class DynamicConvBlock(nn.Module):
         if self.is_last:
             return (x, None)
         else:
-            l_x, h_x = torch.split(x, split_size_or_sections=[C, C_h], dim=1)
+            l_x, h_x = jittor.split(x, split_size=[C, C_h], dim=1)
             return (l_x, h_x)
     
-    def forward(self, x, h_x, h_r):
+    def execute(self, x, h_x, h_r):
         if self.use_checkpoint and x.requires_grad:
             x = checkpoint(self._forward_inner, x, h_x, h_r, use_reentrant=False)
         else:
@@ -706,7 +737,9 @@ class OverLoCK(Module):
             
     def forward_pre_features(self, x):
         # 1,2阶段的计算
+        print('!', self.patch_embed1[0].in_channels, x.shape)
         x = self.patch_embed1(x)
+        print('! done')
         for blk in self.blocks1:
             x = blk(x)
             
@@ -736,7 +769,7 @@ class OverLoCK(Module):
         ctx_ori = self.high_level_proj(ctx) 
         #ctx_ori的计算：压缩通道数量到原来的1/4，
         # 这样就可以直接拼接到第二个dynamic blocks阶段（图中弯曲长红线）,即self.sub_blocks4
-        ctx_up = F.interpolate(ctx_ori, size=x.shape[2:], mode='bilinear', align_corners=False)
+        ctx_up = nn.interpolate(ctx_ori, size=x.shape[2:], mode='bilinear', align_corners=False)
         # ctx_up对ctx_ori进行了上采样，恢复到1/16尺寸的特征图（与basenet输出尺寸对齐），
         # 这样可以通过图中短直红线注入第一个dynamic blocks阶段 （self.sub_blocks3）
         for idx, blk in enumerate(self.sub_blocks3):
