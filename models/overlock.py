@@ -212,7 +212,7 @@ class CTXDownsample(Module):
             nn.BatchNorm2d(h_dim//4)
         )
 
-    def forward(self, x, ctx):
+    def execute(self, x, ctx):
         x = self.x_proj(x)
         ctx = self.h_proj(ctx)
         return (x, ctx)
@@ -427,21 +427,84 @@ class DynamicConvBlock(nn.Module):
         """
         RPB implementation directly borrowed from https://tinyurl.com/mrbub4t3
         """
-        num_repeat_h = jittor.ones(kernel_size, dtype=jittor.int64)
-        num_repeat_w = jittor.ones(kernel_size, dtype=jittor.int64)
-        num_repeat_h[kernel_size//2] = height - (kernel_size-1)
-        num_repeat_w[kernel_size//2] = width - (kernel_size-1)
+        # attn shape: (B, g, H, W, K**2)
+        # rpb shape: (G, K, K)
+        
+        # num_repeat_h = jittor.ones(kernel_size, dtype=jittor.int64)
+        # num_repeat_w = jittor.ones(kernel_size, dtype=jittor.int64)
+        # num_repeat_h[kernel_size//2] = height - (kernel_size-1)
+        # num_repeat_w[kernel_size//2] = width - (kernel_size-1)
+        
+        # num_repeat_h的含义：
+        # natten其实仍然是从KQV视角理解注意力计算，只不过对于每个查询像素q，将它的K和V的选择限制在q的邻域内，即一个卷积核的大小
+        # 当q处在图像靠中间的位置时，以q的位置为中心的窗口（大小为卷积核尺寸）被完整包含在特征图中，这就是它的邻域；
+        # 当q处在水平或竖直方向靠边的位置上时，以q为中心的窗口不能被完整包含在特征图中，所以
+        # 就需要把卷积窗口往特征图内部推一点，造成q不再是窗口的中心，而是偏一点的位置
+        # 这里的num_repeat实际就是统计水平与竖直方向上，q出现在其局部KV邻域窗口中不同相对位置分别的次数
+        # 对于q出现在窗口中心的情况，即以q为中心的窗口完整包含于特征图的情况，
+        # 恰在水平和竖直方向上分别重复出现W - K + 1 和 H - K + 1次（与卷积的滑动窗口个数一样）
+        # 而q出现在窗口非中心位置的情况，恰好各有一次
         # jittor的repeat_interleave的repeats似乎只支持int，不支持对每个元素说明特定重复次数
-        # 得先弄清楚generate_idx & apply_rpb 这两个函数在做什么
-        bias_hw = (idx_h.repeat_interleave(num_repeat_h).unsqueeze(-1) * (2*kernel_size-1)) + idx_w.repeat_interleave(num_repeat_w)
-        bias_idx = bias_hw.unsqueeze(-1) + idx_k
-        bias_idx = bias_idx.reshape(-1, int(kernel_size**2))
-        bias_idx = torch.flip(bias_idx, [0])
-        rpb = torch.flatten(rpb, 1, 2)[:, bias_idx]
+        
+        # 换一种实现，兼容jittor：
+        repeated_idx_h = jittor.full(height, kernel_size // 2, dtype=jittor.int64)
+        repeated_idx_h[0:kernel_size // 2] = jittor.arange(0, kernel_size // 2)
+        repeated_idx_h[height - kernel_size // 2:height] = jittor.arange(kernel_size // 2 + 1, kernel_size)
+        
+        repeated_idx_w = jittor.full(width, kernel_size // 2, dtype=jittor.int64)
+        repeated_idx_w[0:kernel_size // 2] = jittor.arange(0, kernel_size // 2)
+        repeated_idx_w[width - kernel_size // 2:height] = jittor.arange(kernel_size // 2 + 1, kernel_size)
+        bias_hw = (repeated_idx_h.unsqueeze(-1) * (2*kernel_size-1)) + repeated_idx_w
+        # 上面这一步的解释：
+        # 用repeat_interleave 分别计算
+        bias_idx = bias_hw.unsqueeze(-1) + idx_k 
+        # shape: (H, W, K ** 2)，代表H x W的特征图中每个位置作为query的时候，所需的K*K个bias在rpb参数中的索引
+        bias_idx = bias_idx.reshape(-1, int(kernel_size**2))  # (H * W, K ** 2)
+        bias_idx = jittor.flip(bias_idx, [0]) # 翻转存储的空间顺序
+        rpb = jittor.flatten(rpb, 1, 2)[:, bias_idx] # 将可训练的rpb的后两个维度展平，得到shape为(G, K*K) （G是分组数或者说头数）
+        # 这里使用bias_idx作为索引，应该就是用前面设置好的索引方案来用rpb填充整个图
         rpb = rpb.reshape(1, int(self.num_heads), int(height), int(width), int(kernel_size**2))
         return attn + rpb
-    
-
+    def na2d_av(self, attn, value, kernel_size):
+        # 尝试自己实现na2d_av
+        # 思路：
+        # 先把value用某种方式reindex，得到与attn匹配的形状
+        # 然后再作简单的张量乘法（可能用einsum），得到结果
+        
+        # attn shape: (B, g, H, W, K**2)
+        # value shape: (B, g, H, W, C)
+        # target value shape: (B, g, H, W, K**2, C)
+        B, G, H, W, _ = attn.shape
+        K = kernel_size
+        half_K = K // 2
+        C = value.shape[-1]
+        neighbor_values = jittor.reindex(
+            value,
+            shape = [B, G, H, W, K, K, C],
+            indexes = [  ######## 基于target 索引表示出source的索引
+                'i0', # B
+                'i1', # G
+                # 先考虑最简单的情形，即query在邻域中心的情况
+                # f'i2 + i4 - {K // 2}',
+                # f'i3 + i5 - {K // 2}',
+                # 对于边缘情况，以水平方向为例：
+                # 如果i3 - K // 2 < 0，则向左越界，所有的i都应该比理想情况向右偏移K//2 - i3
+                # 所以就是要加上max(K // 2 - i3, 0)
+                # 如果i3 + K // 2 > W - 1，则向右越界，所有的i都应该比理想情况向左偏移W - 1 - (i3 + K // 2)
+                # 其实本质上是要对i3（窗口的中心）进行clamp操作，使它落在K // 2 <= i3 <= W - K // 2 - 1的范围内
+                # 所以结果应该是：
+                f'(((i2 >{half_K})?(i2):{half_K})<{H - half_K - 1})?((i2 >{half_K})?(i2):{half_K}):{H - half_K - 1} + i4 - {half_K}',
+                f'(((i3 >{half_K})?(i3):{half_K})<{W - half_K - 1})?((i3 >{half_K})?(i3):{half_K}):{W - half_K - 1} + i5 - {half_K}',
+                #f'min(max(i3, {half_K}), {W - half_K - 1}) + i5 - {half_K}',
+                #f'clamp(i2, {half_K}, {H - half_K - 1}) + i4 - {half_K}',
+                #f'clamp(i3, {half_K}, {W - half_K - 1}) + i5 - {half_K}',
+                'i6'
+            ]
+        )
+        neighbor_values = rearrange(neighbor_values, 'b g h w i j c -> b g h w (i j) c')
+        #attn = rearrange(attn, 'b g h w l -> b g (h w) l')
+        av = einsum('b g h w l, b g h w l c -> b g h w c', attn, neighbor_values)
+        return av
     def _forward_inner(self, x, h_x, h_r):
         input_resoltion = x.shape[2:]   
         B, C, H, W = x.shape
@@ -488,8 +551,7 @@ class DynamicConvBlock(nn.Module):
         weight = rearrange(weight, 'b l g (h w) -> b g h w l', h=H, w=W)
         # 最后一个维度拆分为两种不同大小的核。注意这里仍然保留了H和W（这两个维度来自前面Q的计算）
         attn1, attn2 = jittor.split(weight, split_size=[self.smk_size**2, self.kernel_size**2], dim=-1)
-        # 生成动态核
-        # rpb1_idx, rpb2_idx应该是动态核的某些索引信息
+        # rpb1_idx, rpb2_idx应该是某些索引信息
         rpb1_idx = self.generate_idx(self.smk_size)
         rpb2_idx = self.generate_idx(self.kernel_size)
         # 这里应该是在结合索引信息生成核权重
@@ -503,9 +565,10 @@ class DynamicConvBlock(nn.Module):
         value = rearrange(x, 'b (m g c) h w -> m b g h w c', m=2, g=self.num_heads)
         # value[i] shape: (B, g, H, W, C)
         # 使用生成的核权重进行卷积
-        ########## 原文使用了natten的实现，这里可能得自己重新写
-        x1 = na2d_av(attn1, value[0], kernel_size=self.smk_size)
-        x2 = na2d_av(attn2, value[1], kernel_size=self.kernel_size)
+        ########## 原文使用了natten的实现，这里可能得自己重新写（尤其是需要注意：query在边缘时注意力窗口是向内回缩的）
+        # value的窗口：在边缘处的K//2个位置的窗口都是一样的
+        x1 = self.na2d_av(attn1, value[0], kernel_size=self.smk_size)
+        x2 = self.na2d_av(attn2, value[1], kernel_size=self.kernel_size)
         # 合并大小核卷积结果
         x = jittor.cat([x1, x2], dim=1)
         x = rearrange(x, 'b g h w c -> b (g c) h w', h=H, w=W)

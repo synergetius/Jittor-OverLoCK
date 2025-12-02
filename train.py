@@ -18,6 +18,8 @@ def get_args_parser():
     parser = argparse.ArgumentParser(description='Jittor Training', add_help=False)
     parser.add_argument('-b', '--batch-size', type=int, default=128, metavar='N',
                         help='input batch size for training (default: 128)')
+    parser.add_argument('--aux-loss-ratio', type=float, default=0.4,
+                        help='Aux loss weight')
     return parser
 class TinyImageNet(Dataset):
     def __init__(self, root, train=True, transform=None, debug=False):
@@ -78,16 +80,23 @@ class TinyImageNet(Dataset):
         # return img, label
         return img, jittor.int32(label)
 def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args):
-    for i, (inputs, targets) in enumerate(loader):
+    total_batches = len(loader)
+    for i, (input, target) in enumerate(loader):
         # if epoch == start_epoch and i < start_batch:
             # continue
 
         try:
-            outputs = model(inputs)
-            loss = loss_fn(outputs, targets)
+            output = model(input)
+            output_main = output['main']
+            output_aux = output['aux']
+            loss_main = loss_fn(output_main, target)
+            loss_aux = loss_fn(output_aux, target)
+            loss = loss_main + args.aux_loss_ratio * loss_aux
+            
             optimizer.step(loss)
-
-            print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}] Loss: {loss.item():.4f}")
+            #print(loss)
+            print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}]")
+            #print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}] Loss: {loss.item():.4f}")
 
 
         except Exception as e:
