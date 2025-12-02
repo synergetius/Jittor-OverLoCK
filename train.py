@@ -7,7 +7,8 @@ import os
 import time
 from collections import OrderedDict
 from contextlib import suppress
-
+os.environ['JT_SYNC'] = '1'
+os.environ['trace_py_var'] = '3'
 from jittor.dataset import DataLoader, Dataset
 from jittor.transform import Compose, Resize, RandomCrop, ToTensor, RandomHorizontalFlip
 from jittor import nn
@@ -16,8 +17,8 @@ import models
 from PIL import Image  
 def get_args_parser():
     parser = argparse.ArgumentParser(description='Jittor Training', add_help=False)
-    parser.add_argument('-b', '--batch-size', type=int, default=128, metavar='N',
-                        help='input batch size for training (default: 128)')
+    parser.add_argument('-b', '--batch-size', type=int, default=8, metavar='N',
+                        help='input batch size for training (default: 128)') ############### 暂时修改，测试存储分配问题
     parser.add_argument('--aux-loss-ratio', type=float, default=0.4,
                         help='Aux loss weight')
     return parser
@@ -103,6 +104,12 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args):
             print(f"训练第{i+1}个 batch 时出错: {e}")
             raise
 def main(args):
+
+    # os.environ['JT_SYNC'] = '1'
+    # os.environ['trace_py_var'] = '3' 
+    # os.environ['JT_LOG'] = '1'
+    # os.environ['JT_SAVE_MEM'] = '1'
+    # os.environ['JT_OPT_LEVEL'] = '0'
     def custom_normalize(tensor):
         mean = jittor.array([0.485, 0.456, 0.406]).view(3,1,1)
         std = jittor.array([0.229, 0.224, 0.225]).view(3,1,1) ###### 这里执行通道维度转换

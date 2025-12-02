@@ -4,6 +4,8 @@ from jittor import nn
 from jittor.einops import rearrange
 from jittor.linalg import einsum
 import numpy as np
+import os
+import hashlib
 def get_conv2d(in_channels, 
                out_channels, 
                kernel_size, 
@@ -182,6 +184,7 @@ class DilatedReparamBlock(Module):
         return out
 
     def merge_dilated_branches(self):
+        print("merge")
         if hasattr(self, 'origin_bn'):
             origin_k, origin_b = fuse_bn(self.lk_origin, self.origin_bn)
             for k, r in zip(self.kernel_sizes, self.dilates):
@@ -275,21 +278,15 @@ class RepConvBlock(Module):
         x = self.dwconv(x)
         # 应该是残差连接与layerscale的两种不同的组合方式
         if self.res_scale:
-            print("p1")
-            if self.ls_init_value is not None:
-                print(x.shape, self.ls.weight.shape)
+
             y = self.ls(x)
-            print("p11")
             z = self.proj(x)
-            print("p12")
             #print(x.shape, y.shape, z.shape)
             x = y + z
            
         else:
-            print("p2")
             drop_path = self.proj[-1]
             x = x + drop_path(self.ls(self.proj[:-1](x)))
-        print("p3")
         return x
     
     def execute(self, x):
@@ -300,6 +297,146 @@ class RepConvBlock(Module):
             x = self.forward_features(x)
         
         return x
+
+
+
+class NeighborhoodExtractionOp(Module):
+    """封装reindex操作的自定义算子"""
+    
+    def __init__(self, max_kernel_size=15, compile_dir="compiled_ops"):
+        super().__init__()
+        self.max_kernel_size = max_kernel_size
+        self.compile_dir = compile_dir
+        self.compiled_ops = {}  # 缓存已编译的算子
+        
+        # 确保编译目录存在
+        os.makedirs(compile_dir, exist_ok=True)
+        
+    def execute(self, value, attn_weights, kernel_size):
+        """
+        优化的邻域提取操作
+        
+        参数:
+            value: 输入特征 [B, G, H, W, C]
+            attn_weights: 注意力权重 [B, G, H, W, K*K]  
+            kernel_size: 卷积核大小
+        """
+        B, H, W, C = value.shape
+        K = kernel_size
+        half_K = K // 2
+        
+        # 生成算子签名（用于缓存） ？？？？
+        op_signature = f"neighborhood_B{B}_H{H}_W{W}_C{C}_K{K}"
+        op_hash = hashlib.md5(op_signature.encode()).hexdigest()
+        so_path = os.path.join(self.compile_dir, f"{op_hash}.so")
+        
+        # 检查是否已编译 ############## 暂时取消
+        # if op_signature in self.compiled_ops:
+            # return self.compiled_ops[op_signature](value, attn_weights)
+        
+        # 首次使用，进行编译
+        print(f"编译邻域提取算子: {op_signature}")
+        
+        # 定义索引表达式（使用预计算值，避免动态计算）
+        indexes = [ 
+            'i0', # B
+            'i1', # G
+            f'(((i2 >{half_K})?(i2):{half_K})<{H - half_K - 1})?((i2 >{half_K})?(i2):{half_K}):{H - half_K - 1} + i4 - {half_K}',
+            f'(((i3 >{half_K})?(i3):{half_K})<{W - half_K - 1})?((i3 >{half_K})?(i3):{half_K}):{W - half_K - 1} + i5 - {half_K}',
+            'i6'
+        ]
+        
+        # 使用jit.code进行即时编译
+        @jt.code([
+            value.shape,  # 输入形状
+            [B, G, H, W, K, K, C],  # 输出形状
+            jt.float32  # 数据类型
+        ], cpu_src='''
+            for (int b = 0; b < in0_shape0; b++) {
+                for (int h = 0; h < in0_shape1; h++) {
+                    for (int w = 0; w < in0_shape2; w++) {
+                        for (int kh = 0; kh < %d; kh++) {
+                            for (int kw = 0; kw < %d; kw++) {
+                                for (int c = 0; c < in0_shape3; c++) {
+                                    int src_h = h + kh - %d;
+                                    int src_w = w + kw - %d;
+                                    
+                                    // 边界处理
+                                    if (src_h >= 0 && src_h < in0_shape1 && 
+                                        src_w >= 0 && src_w < in0_shape2) {
+                                        out0(b, h, w, kh, kw, c) = in0(b, src_h, src_w, c);
+                                    } else {
+                                        out0(b, h, w, kh, kw, c) = 0.0f;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        ''' % (K, K, half_K, half_K))
+        def extract_neighborhood(value):
+            output = jt.zeros((B, H, W, K, K, C), dtype=value.dtype)
+            return output
+        
+        # 执行并缓存
+        neighbor_values = extract_neighborhood(value)
+        self.compiled_ops[op_signature] = extract_neighborhood
+        
+        return neighbor_values
+
+    def precompile_common_shapes(self, common_shapes):
+        """预编译常见形状的算子"""
+        for shape_info in common_shapes:
+            B, H, W, C, K = shape_info
+            # 创建虚拟输入触发编译
+            dummy_value = jt.randn(B, H, W, C)
+            dummy_attn = jt.randn(B, H, W, K*K)
+            _ = self.execute(dummy_value, dummy_attn, K)
+class NA2DAV(Module):
+    """使用预编译算子的优化实现"""
+    
+    def __init__(self, kernel_sizes=[5, 7]):
+        super().__init__()
+        self.kernel_sizes = kernel_sizes
+        self.neighborhood_ops = {}
+        
+        # 为每个核大小创建独立的提取算子
+        for K in kernel_sizes:
+            self.neighborhood_ops[K] = NeighborhoodExtractionOp()
+    
+    def execute(self, attn_weights, value, kernel_size):
+        B, H, W, C = value.shape
+        K = kernel_size
+        
+        # 使用预编译的算子
+        neighbor_values = self.neighborhood_ops[K](value, attn_weights, K)
+        
+        # 重塑注意力权重以匹配邻域形状
+        attn_reshaped = attn_weights.reshape(B, H, W, K, K)
+        
+        # 使用einsum进行高效计算
+        output = jt.einsum('bihwkl,bihwklc->bihwc', 
+                          attn_reshaped, neighbor_values)
+        
+        return output
+
+    def warmup(self, common_configs):
+        """预热：预编译常见配置"""
+        for config in common_configs:
+            B, H, W, C, K = config
+            print(f"预热配置: B{B}_H{H}_W{W}_C{C}_K{K}")
+            
+            # 创建测试数据
+            dummy_value = jt.randn(B, H, W, C)
+            dummy_attn = jt.randn(B, H, W, K*K)
+            
+            # 触发编译
+            with jt.no_grad():
+                _ = self.execute(dummy_attn, dummy_value, K)
+            
+            # 同步确保编译完成
+            jt.sync_all()
 class DynamicConvBlock(nn.Module):
     def __init__(self,
                  dim=64,
@@ -478,6 +615,7 @@ class DynamicConvBlock(nn.Module):
         K = kernel_size
         half_K = K // 2
         C = value.shape[-1]
+        #neighbor_values = jittor.zeros([B, G, H, W, K, K, C]) # 尝试跳过会怎么样
         neighbor_values = jittor.reindex(
             value,
             shape = [B, G, H, W, K, K, C],
@@ -591,8 +729,13 @@ class DynamicConvBlock(nn.Module):
         
         x = self.dwconv2(x)
          
-        if self.res_scale:
-            x = self.ls2(x) + self.drop_path(self.mlp(self.norm2(x)))
+        if self.res_scale:###################### 定位到这里出错了
+            y = self.norm2(x)
+            y = self.mlp(y)
+            y = self.drop_path(y)
+            x = self.ls2(x)
+            print('x:', x.shape, 'y:', y.shape)
+            x = x + y
         else:
             x = x + self.drop_path(self.ls2(self.mlp(self.norm2(x))))
 
@@ -800,9 +943,7 @@ class OverLoCK(Module):
             
     def forward_pre_features(self, x):
         # 1,2阶段的计算
-        print('!', self.patch_embed1[0].in_channels, x.shape)
         x = self.patch_embed1(x)
-        print('! done')
         for blk in self.blocks1:
             x = blk(x)
             
