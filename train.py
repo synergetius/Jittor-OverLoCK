@@ -2,6 +2,7 @@ import argparse
 import datetime
 import json
 import csv
+import pandas as pd
 import logging
 import os
 import time
@@ -10,14 +11,14 @@ from contextlib import suppress
 os.environ['JT_SYNC'] = '1'
 os.environ['trace_py_var'] = '3'
 from jittor.dataset import DataLoader, Dataset
-from jittor.transform import Compose, Resize, RandomCrop, ToTensor, RandomHorizontalFlip
+from jittor.transform import Compose, Resize, RandomCrop, CenterCrop, ToTensor, RandomHorizontalFlip
 from jittor import nn
 import jittor
 import models
 from PIL import Image  
 def get_args_parser():
     parser = argparse.ArgumentParser(description='Jittor Training', add_help=False)
-    parser.add_argument('-b', '--batch-size', type=int, default=8, metavar='N',
+    parser.add_argument('-b', '--batch-size', type=int, default=32, metavar='N',
                         help='input batch size for training (default: 128)') ############### 暂时修改，测试存储分配问题
     parser.add_argument('--aux-loss-ratio', type=float, default=0.4,
                         help='Aux loss weight')
@@ -66,7 +67,7 @@ class TinyImageNet(Dataset):
             self.samples = [
                 (os.path.join(self.data_dir, img_name), self.class_to_idx[self.img_to_class[img_name]])
                 for img_name in self.img_to_class.keys()
-                if os.path.isfile(os.path.join(self.data_dir, img_name))
+                #if os.path.isfile(os.path.join(self.data_dir, img_name))
             ]
         self.set_attrs(total_len=len(self.samples))
         #self.set_attrs(total_len=len(self.samples), batch_size=128, shuffle=True)
@@ -82,7 +83,13 @@ class TinyImageNet(Dataset):
         return img, jittor.int32(label)
 def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args):
     total_batches = len(loader)
+    time0 = time.time()
+    losses_m = 0
+    losses_aux_m = 0
+    total = 0 # 样本总数
     for i, (input, target) in enumerate(loader):
+        if i >= 0:
+            break ############### for test
         # if epoch == start_epoch and i < start_batch:
             # continue
 
@@ -93,16 +100,61 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args):
             loss_main = loss_fn(output_main, target)
             loss_aux = loss_fn(output_aux, target)
             loss = loss_main + args.aux_loss_ratio * loss_aux
-            
+            losses_m += loss * input.size(0) #loss_fn默认对batch内所有样本取平均
+            losses_aux_m += loss_aux * input.size(0)
             optimizer.step(loss)
             #print(loss)
-            print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}]")
-            #print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}] Loss: {loss.item():.4f}")
-
-
+            #print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}]")
+            print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}] Loss: {loss.item():.4f}")
+            total += input.size(0)
+            jittor.sync_all()
+            jittor.gc()
         except Exception as e:
             print(f"训练第{i+1}个 batch 时出错: {e}")
             raise
+    if total:
+        losses_m /= total
+        losses_aux_m /= total
+    epoch_time = time.time() - time0
+    train_info_dict = {
+        'epoch_time': round(epoch_time / 60, 1),
+        'loss': float(losses_m),
+        'loss_aux': float(losses_aux_m)
+    }
+    
+    return OrderedDict(train_info_dict)
+def correct_topk(output, target, k = 1):
+    
+    predicted, _ = output.topk(k, dim = 1)
+    correct = (predicted == target).sum().float().item()
+    return correct
+def validate(model, loader, loss_fn, args):
+    model.eval()
+    correct_top1 = 0
+    correct_top5 = 0
+    total_batches = len(loader)
+    losses_m = 0
+    total = 0
+    with jittor.no_grad():
+        for i, (input, target) in enumerate(loader):
+            if i >= 1: #### for test
+                break
+            output = model(input)
+            print(output.shape)
+            loss = loss_fn(output, target)
+            losses_m += loss * input.size(0)
+            total += input.size(0)
+            correct_top1 += correct_topk(output, target, 1)
+            correct_top5 += correct_topk(output, target, 5)
+    losses_m /= total
+    acc_top1 = correct_top1 / total
+    acc_top5 = correct_top5 / total
+
+    metrics = OrderedDict([('loss', float(losses_m)),
+                           ('acc_top1', float(acc_top1)),
+                           ('acc_top5', float(acc_top5))])
+
+    return metrics
 def main(args):
 
     # os.environ['JT_SYNC'] = '1'
@@ -110,111 +162,96 @@ def main(args):
     # os.environ['JT_LOG'] = '1'
     # os.environ['JT_SAVE_MEM'] = '1'
     # os.environ['JT_OPT_LEVEL'] = '0'
+    jittor.flags.use_cuda = 1
+    jittor.flags.log_silent = 0
+    jittor.flags.log_v = 1
+    
+    #jittor.flags.lazy_execution = 0
     def custom_normalize(tensor):
         mean = jittor.array([0.485, 0.456, 0.406]).view(3,1,1)
         std = jittor.array([0.229, 0.224, 0.225]).view(3,1,1) ###### 这里执行通道维度转换
         return (tensor - mean) / std
-    transform = Compose([
-        Resize(256),
-        RandomCrop(224),
-        RandomHorizontalFlip(),  
-        ToTensor(),
-        custom_normalize
-    ])
+    
     train_dataset = TinyImageNet(
         root = '/mnt/d/data/tiny-imagenet-200',
         train = True,
-        transform = transform,
+        transform = Compose([
+            Resize(256),
+            RandomCrop(224),
+            RandomHorizontalFlip(),  
+            ToTensor(),
+            custom_normalize
+        ]),
         debug = True
     )
+    val_dataset = TinyImageNet(
+        root = '/mnt/d/data/tiny-imagenet-200',
+        train = False,
+        transform = Compose([
+            Resize(256),
+            CenterCrop(224),
+            ToTensor(),
+            custom_normalize
+        ]) ######### 需要一致
+    )
     train_loader = train_dataset.set_attrs(batch_size = args.batch_size, shuffle = True) 
-    model = models.overlock_xt()
+    val_loader = val_dataset.set_attrs(batch_size = args.batch_size, shuffle=False) #num_workers 有何作用？？？
+    #model = models.overlock_xt()
+    model = models.overlock_xxt() ############
+    
     optimizer = jittor.optim.AdamW(model.parameters(), lr = 1e-3) ####### 仅作为测试
     train_loss_fn = nn.CrossEntropyLoss()
+    validate_loss_fn = nn.CrossEntropyLoss()
     ############# test
     start_epoch = 0
     num_epochs = 1
+    
+    train_loss = []
+    train_loss_aux = []
+    epoch_time = []
+    val_loss = []
+    acc_top1 = []
+    acc_top5 = []
     for epoch in range(start_epoch, num_epochs):
-        # if args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
-            # loader_train.sampler.set_epoch(epoch)
 
         train_metrics = train_one_epoch(
             epoch, model, train_loader, 
             optimizer, train_loss_fn, args,
-            #lr_scheduler=lr_scheduler, 
-            #saver=saver, output_dir=output_dir,
-            #amp_autocast=amp_autocast, 
-            #loss_scaler=loss_scaler, 
-            #model_ema=model_ema, 
-            #mixup_fn=mixup_fn,
-            #eta_meter=AverageMeter()
         )
-        if (epoch % args.val_freq == 0) or epoch > args.val_start_epoch or resume_mode:
-            resume_mode = False
-            if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
-                if args.local_rank == 0:
-                    _logger.info("Distributing BatchNorm running means and vars")
-                distribute_bn(model, args.world_size,
-                              args.dist_bn == 'reduce')
-
-            eval_metrics = validate(model, loader_eval, validate_loss_fn, 
-                                    args, amp_autocast=amp_autocast)
-
-            if model_ema is not None and not args.model_ema_force_cpu:
-                if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
-                    distribute_bn(model_ema, args.world_size,
-                                  args.dist_bn == 'reduce')
-                ema_eval_metrics = validate(model_ema.module, loader_eval,
-                                            validate_loss_fn, args,
-                                            amp_autocast=amp_autocast,
-                                            log_suffix=f'_{ema_save_tag}')
-                eval_metrics.update(ema_eval_metrics)
-        else:
-            eval_metrics = {key: float('-inf') for key in eval_metrics}
-
-        if lr_scheduler is not None:
-            # step LR for next epoch
-            lr_scheduler.step(epoch + 1, eval_metrics[eval_metric])
-
-        if output_dir is not None:
-            update_summary(epoch,
-                           train_metrics,
-                           eval_metrics,
-                           os.path.join(output_dir, 'summary.csv'),
-                           write_header=best_metric is None,
-                           log_wandb=args.log_wandb and has_wandb)
-
-        if saver is not None:
-            # save proper checkpoint with eval metric
-            save_metric = eval_metrics[eval_metric]
-            best_metric, best_epoch = saver.save_checkpoint(epoch, metric=save_metric)
-
-        if saver_ema is not None:
-            # save proper checkpoint with eval metric (ema)
-            save_metric = eval_metrics[eval_metric_ema]
-            best_metric_ema, best_epoch_ema = saver_ema.save_checkpoint(epoch, metric=save_metric)
-
+        train_loss.append(train_metrics['loss'])
+        train_loss_aux.append(train_metrics['loss_aux'])
+        epoch_time.append(train_metrics['epoch_time'])
         
-        if best_metric is not None:
-            
-            if args.local_rank == 0:
-                _logger.info(f"Currently Best Accuracy: {best_metric:.2f} at Epoch {best_epoch}")
-                if best_metric_ema is not None:
-                    _logger.info(f"Currently Best Accuracy (EMA): {best_metric_ema:.2f} at Epoch {best_epoch_ema}")
-                _logger.info('\n')
-                
-            with open(os.path.join(output_dir, 'best-metric.json'), 'w') as f:
-                
-                best_metric_info = {
-                    eval_metric: best_metric,
-                    'epoch': best_epoch,
-                }
-                
-                if best_metric_ema is not None:
-                    best_metric_info[eval_metric_ema] = best_metric_ema
-                    best_metric_info['epoch_ema'] = best_epoch_ema
-                    
-                json.dump(best_metric_info, f, indent=4)
+        
+        val_metrics = validate(model, val_loader, validate_loss_fn, args)
+        val_loss.append(val_metrics["loss"])
+        acc_top1.append(val_metrics["acc_top1"])
+        acc_top5.append(val_metrics["acc_top5"])
+        print(f"[Epoch {epoch+1}")
+        for key, value in train_metrics.items():
+            print(f"{key}: {value}")
+        for key, value in val_metrics.items():
+            print(f"{key}: {value}")
+        print("]")
+    # log = pd.DataFrame({
+        # "train_loss":train_loss, 
+        # "train_loss_aux":train_loss_aux,
+        # "val_loss":val_loss,
+        # "acc_top1":acc_top1,
+        # "acc_top5":acc_top5
+    # })
+    log = {
+        "train_loss":train_loss, 
+        "train_loss_aux":train_loss_aux,
+        "epoch_time":epoch_time,
+        "val_loss":val_loss,
+        "acc_top1":acc_top1,
+        "acc_top5":acc_top5
+    }
+    pd.DataFrame(log).to_csv("log.csv", index = False, header = True)
+    # log.to_csv('log.csv', index = False, header = True)
 if __name__ == '__main__':
     args = get_args_parser().parse_args()
     main(args)
+    
+    
