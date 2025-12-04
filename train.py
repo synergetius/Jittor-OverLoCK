@@ -44,23 +44,25 @@ class TinyImageNet(Dataset):
             self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
             print(f"[DEBUG] 找到 {len(self.classes)} 个类别")  
             sample_ind = os.path.join(self.root, 'train_samples.csv')
-            if os.path.isfile(sample_ind):
-                with open(sample_ind, mode = "r") as f:
-                    self.samples = [(path, int(cls_idx)) for path, cls_idx in csv.reader(f)]
-            else:
+            # if os.path.isfile(sample_ind):
+                # with open(sample_ind, mode = "r") as f:
+                    # self.samples = [(path, int(cls_idx)) for path, cls_idx in csv.reader(f)]
+            # else:
                 
-                for cls in self.classes:
-                    cls_dir = os.path.join(self.data_dir, cls, 'images')
-                    cls_idx = self.class_to_idx[cls]
-                    print(f"[DEBUG] 开始扫描类别 {cls} ")  
-                    for img_name in os.listdir(cls_dir):
-                        self.samples.append((os.path.join(cls_dir, img_name), cls_idx))
-                with open(sample_ind, mode = "w") as f:
-                    csv.writer(f).writerows(self.samples)
+            for cls in self.classes:
+                cls_dir = os.path.join(self.data_dir, cls, 'images')
+                cls_idx = self.class_to_idx[cls]
+                print(f"[DEBUG] 开始扫描类别 {cls} ")  
+                ls = sorted(os.listdir(cls_dir)) # 固定顺序选取一部分
+                for img_name in ls[:len(ls) // 8]: ######## 尝试每个类别只用一小部分训练，降低计算量
+                    self.samples.append((os.path.join(cls_dir, img_name), cls_idx))
+            with open(sample_ind, mode = "w") as f:
+                csv.writer(f).writerows(self.samples)
         else:
             print(f"[DEBUG] 开始读取验证集注释文件: {self.annotation_file}")  
             with open(self.annotation_file, 'r') as f:
                 lines = f.readlines()
+            lines = lines[:len(lines) // 8] ####### 只取（按注释文件顺序的）一小部分作为验证集
             self.img_to_class = {line.split('\t')[0]: line.split('\t')[1] for line in lines}
             self.classes = sorted(list(set(self.img_to_class.values())))
             self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
@@ -81,17 +83,15 @@ class TinyImageNet(Dataset):
             img = self.transform(img)
         # return img, label
         return img, jittor.int32(label)
-def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args):
+def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args, logfile):
     total_batches = len(loader)
     time0 = time.time()
     losses_m = 0
     losses_aux_m = 0
     total = 0 # 样本总数
     for i, (input, target) in enumerate(loader):
-        if i >= 0:
-            break ############### for test
-        # if epoch == start_epoch and i < start_batch:
-            # continue
+        # if i >= 0:
+            # break ############### for test
 
         try:
             output = model(input)
@@ -106,11 +106,13 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args):
             #print(loss)
             #print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}]")
             print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}] Loss: {loss.item():.4f}")
+            print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}] Loss: {loss.item():.4f}", file = logfile)
             total += input.size(0)
             jittor.sync_all()
             jittor.gc()
         except Exception as e:
             print(f"训练第{i+1}个 batch 时出错: {e}")
+            print(f"训练第{i+1}个 batch 时出错: {e}", file = logfile)
             raise
     if total:
         losses_m /= total
@@ -128,24 +130,27 @@ def correct_topk(output, target, k = 1):
     predicted, _ = output.topk(k, dim = 1)
     correct = (predicted == target).sum().float().item()
     return correct
-def validate(model, loader, loss_fn, args):
+def validate(epoch, model, loader, loss_fn, args, logfile):
     model.eval()
     correct_top1 = 0
     correct_top5 = 0
     total_batches = len(loader)
+    print(total_batches)
     losses_m = 0
     total = 0
     with jittor.no_grad():
         for i, (input, target) in enumerate(loader):
-            if i >= 1: #### for test
-                break
+            # if i >= 1: #### for test
+                # break
             output = model(input)
-            print(output.shape)
+            # print(output.shape)
             loss = loss_fn(output, target)
             losses_m += loss * input.size(0)
             total += input.size(0)
             correct_top1 += correct_topk(output, target, 1)
             correct_top5 += correct_topk(output, target, 5)
+            print(f"[Epoch {epoch+1} | validated Batch {i+1}/{total_batches}]")
+            print(f"[Epoch {epoch+1} | validated Batch {i+1}/{total_batches}]", file = logfile)
     losses_m /= total
     acc_top1 = correct_top1 / total
     acc_top5 = correct_top5 / total
@@ -156,7 +161,7 @@ def validate(model, loader, loss_fn, args):
 
     return metrics
 def main(args):
-
+    
     # os.environ['JT_SYNC'] = '1'
     # os.environ['trace_py_var'] = '3' 
     # os.environ['JT_LOG'] = '1'
@@ -165,7 +170,7 @@ def main(args):
     jittor.flags.use_cuda = 1
     jittor.flags.log_silent = 0
     jittor.flags.log_v = 1
-    
+    logfile = open("log.txt", "w")
     #jittor.flags.lazy_execution = 0
     def custom_normalize(tensor):
         mean = jittor.array([0.485, 0.456, 0.406]).view(3,1,1)
@@ -204,7 +209,7 @@ def main(args):
     validate_loss_fn = nn.CrossEntropyLoss()
     ############# test
     start_epoch = 0
-    num_epochs = 1
+    num_epochs = 10
     
     train_loss = []
     train_loss_aux = []
@@ -216,23 +221,27 @@ def main(args):
 
         train_metrics = train_one_epoch(
             epoch, model, train_loader, 
-            optimizer, train_loss_fn, args,
+            optimizer, train_loss_fn, args, logfile
         )
         train_loss.append(train_metrics['loss'])
         train_loss_aux.append(train_metrics['loss_aux'])
         epoch_time.append(train_metrics['epoch_time'])
         
         
-        val_metrics = validate(model, val_loader, validate_loss_fn, args)
+        val_metrics = validate(epoch, model, val_loader, validate_loss_fn, args, logfile)
         val_loss.append(val_metrics["loss"])
         acc_top1.append(val_metrics["acc_top1"])
         acc_top5.append(val_metrics["acc_top5"])
         print(f"[Epoch {epoch+1}")
+        print(f"[Epoch {epoch+1}", file = logfile)
         for key, value in train_metrics.items():
             print(f"{key}: {value}")
+            print(f"{key}: {value}", file = logfile)
         for key, value in val_metrics.items():
             print(f"{key}: {value}")
+            print(f"{key}: {value}", file = logfile)
         print("]")
+        print("]", file = logfile)
     # log = pd.DataFrame({
         # "train_loss":train_loss, 
         # "train_loss_aux":train_loss_aux,
@@ -249,6 +258,8 @@ def main(args):
         "acc_top5":acc_top5
     }
     pd.DataFrame(log).to_csv("log.csv", index = False, header = True)
+    jittor.save(model.state_dict(), "overlock.pkl")
+    logfile.close()
     # log.to_csv('log.csv', index = False, header = True)
 if __name__ == '__main__':
     args = get_args_parser().parse_args()
