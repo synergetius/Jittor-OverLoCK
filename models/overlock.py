@@ -911,12 +911,14 @@ def overlock_xxt(pretrained=False, pretrained_cfg=None, **kwargs):
     model = OverLoCK(
         depth=[1, 1, 1, 1],           # 最小深度配置
         sub_depth=[2, 1],              # 最简动态块配置
-        embed_dim=[24, 48, 96, 128],   # 极低通道数
+        embed_dim=[12, 24, 48, 64],   # 极低通道数
+        # embed_dim=[24, 48, 96, 128],   # 极低通道数
         kernel_size=[11, 9, 7, 5],      # 更小的卷积核
         mlp_ratio=[2, 2, 2, 2],        # 最小MLP扩展
         sub_num_heads=[1, 2],          # 最少注意力头
         sub_mlp_ratio=[2, 2],
-        projection=256,               # 极简分类头
+        # projection=256,               # 极简分类头
+        projection=128,               # 极简分类头
         #use_checkpoint=[0, 0, 0, 0],
         **kwargs
     )

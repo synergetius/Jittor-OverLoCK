@@ -15,10 +15,14 @@ from jittor.transform import Compose, Resize, RandomCrop, CenterCrop, ToTensor, 
 from jittor import nn
 import jittor
 import models
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg') 
+import numpy as np
 from PIL import Image  
 def get_args_parser():
     parser = argparse.ArgumentParser(description='Jittor Training', add_help=False)
-    parser.add_argument('-b', '--batch-size', type=int, default=32, metavar='N',
+    parser.add_argument('-b', '--batch-size', type=int, default=64, metavar='N',
                         help='input batch size for training (default: 128)') ############### 暂时修改，测试存储分配问题
     parser.add_argument('--aux-loss-ratio', type=float, default=0.4,
                         help='Aux loss weight')
@@ -48,29 +52,59 @@ class TinyImageNet(Dataset):
                 # with open(sample_ind, mode = "r") as f:
                     # self.samples = [(path, int(cls_idx)) for path, cls_idx in csv.reader(f)]
             # else:
-                
-            for cls in self.classes:
+            print('classes number:', len(self.classes))
+            
+            sample_count = np.zeros(len(self.classes))
+
+            for i, cls in enumerate(self.classes):
                 cls_dir = os.path.join(self.data_dir, cls, 'images')
                 cls_idx = self.class_to_idx[cls]
-                print(f"[DEBUG] 开始扫描类别 {cls} ")  
-                ls = sorted(os.listdir(cls_dir)) # 固定顺序选取一部分
-                for img_name in ls[:len(ls) // 8]: ######## 尝试每个类别只用一小部分训练，降低计算量
+                #print(f"[DEBUG] 开始扫描类别 {cls} ")  
+                ls = sorted(os.listdir(cls_dir)) 
+                ls = ls[:len(ls) // 8]# 固定顺序选取一部分
+                sample_count[i] += len(ls)
+                for img_name in ls: ######## 尝试每个类别只用一小部分训练，降低计算量
                     self.samples.append((os.path.join(cls_dir, img_name), cls_idx))
             with open(sample_ind, mode = "w") as f:
                 csv.writer(f).writerows(self.samples)
+            plot = False
+            if plot:
+                plt.bar(self.classes, sample_count)
+                plt.savefig('train_samples.png', dpi=300, bbox_inches='tight')
+                # 200个类别样本数量是均匀的
+                
         else:
             print(f"[DEBUG] 开始读取验证集注释文件: {self.annotation_file}")  
             with open(self.annotation_file, 'r') as f:
                 lines = f.readlines()
-            lines = lines[:len(lines) // 8] ####### 只取（按注释文件顺序的）一小部分作为验证集
-            self.img_to_class = {line.split('\t')[0]: line.split('\t')[1] for line in lines}
-            self.classes = sorted(list(set(self.img_to_class.values())))
+            #lines = lines[:len(lines) // 8] ####### 只取（按注释文件顺序的）一小部分作为验证集
+            # self.img_to_class = {line.split('\t')[0]: line.split('\t')[1] for line in lines}
+            self.class_to_img = {}
+            for line in lines:
+                img, cls = line.split('\t')[:2]
+                self.class_to_img.setdefault(cls, []).append(img)
+            self.classes = sorted(list(self.class_to_img.keys()))
             self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
-            self.samples = [
-                (os.path.join(self.data_dir, img_name), self.class_to_idx[self.img_to_class[img_name]])
-                for img_name in self.img_to_class.keys()
-                #if os.path.isfile(os.path.join(self.data_dir, img_name))
-            ]
+            # 200 classes, each 50 samples
+            print('validation classes number:', len(self.classes))
+            sample_count = np.zeros(len(self.classes))
+            
+            
+            self.samples = []
+            for cls, imgs in self.class_to_img.items():
+                # 每个类共50个样本，取按注释文件顺序的前12个样本，共2400个
+                for img in imgs[:12]:
+                    sample_count[self.class_to_idx[cls]] += 1
+                    self.samples.append((os.path.join(self.data_dir, img), self.class_to_idx[cls]))
+            plot = True
+            if plot:
+                plt.bar(self.classes, sample_count)
+                plt.savefig('val_samples.png', dpi=300, bbox_inches='tight')
+            # self.samples = [
+                # (os.path.join(self.data_dir, img_name), self.class_to_idx[self.img_to_class[img_name]])
+                # for img_name in self.img_to_class.keys()
+                # #if os.path.isfile(os.path.join(self.data_dir, img_name))
+            # ]
         self.set_attrs(total_len=len(self.samples))
         #self.set_attrs(total_len=len(self.samples), batch_size=128, shuffle=True)
 
@@ -84,6 +118,7 @@ class TinyImageNet(Dataset):
         # return img, label
         return img, jittor.int32(label)
 def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args, logfile):
+    model.train()
     total_batches = len(loader)
     time0 = time.time()
     losses_m = 0
@@ -91,8 +126,10 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args, logfile):
     total = 0 # 样本总数
     for i, (input, target) in enumerate(loader):
         # if i >= 0:
+        # if epoch == 0:
+            
             # break ############### for test
-
+     
         try:
             output = model(input)
             output_main = output['main']
@@ -135,13 +172,14 @@ def validate(epoch, model, loader, loss_fn, args, logfile):
     correct_top1 = 0
     correct_top5 = 0
     total_batches = len(loader)
-    print(total_batches)
+    # print(total_batches)
     losses_m = 0
     total = 0
     with jittor.no_grad():
         for i, (input, target) in enumerate(loader):
             # if i >= 1: #### for test
-                # break
+                # print(i)
+                # continue
             output = model(input)
             # print(output.shape)
             loss = loss_fn(output, target)
