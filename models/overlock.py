@@ -924,6 +924,7 @@ def overlock_xxt(pretrained=False, pretrained_cfg=None, **kwargs):
         # # projection=256,               # 极简分类头
         # projection=128,               # 极简分类头
         
+        ############## log-2 configs
         depth=[1, 1, 2, 1],           # 最小深度配置
         sub_depth=[3, 1],              # 最简动态块配置
         embed_dim=[24, 48, 96, 128],   # 极低通道数

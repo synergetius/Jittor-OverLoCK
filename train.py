@@ -29,7 +29,7 @@ def get_args_parser():
     return parser
 class TinyImageNet(Dataset):
     N_CLASS = 20 # 选择的类别数（按编号字典序）
-    N_TRAIN = 1000 # 每个类别的训练样本数
+    N_TRAIN = 500 # 每个类别的训练样本数（TinyImageNet数据集每个类别总共有500个）
     N_VAL = 100 # 每个类别的验证样本数
     def __init__(self, root, train=True, transform=None, debug=False):
         super().__init__()
