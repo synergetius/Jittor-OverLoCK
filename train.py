@@ -28,6 +28,9 @@ def get_args_parser():
                         help='Aux loss weight')
     return parser
 class TinyImageNet(Dataset):
+    N_CLASS = 20 # 选择的类别数（按编号字典序）
+    N_TRAIN = 1000 # 每个类别的训练样本数
+    N_VAL = 100 # 每个类别的验证样本数
     def __init__(self, root, train=True, transform=None, debug=False):
         super().__init__()
         self.root = root
@@ -44,7 +47,7 @@ class TinyImageNet(Dataset):
         self.samples = []
         if self.train:
             print(f"[DEBUG] 开始扫描训练集类别...")  
-            self.classes = sorted(os.listdir(self.data_dir))
+            self.classes = sorted(os.listdir(self.data_dir))[:self.N_CLASS]
             self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
             print(f"[DEBUG] 找到 {len(self.classes)} 个类别")  
             sample_ind = os.path.join(self.root, 'train_samples.csv')
@@ -61,13 +64,13 @@ class TinyImageNet(Dataset):
                 cls_idx = self.class_to_idx[cls]
                 #print(f"[DEBUG] 开始扫描类别 {cls} ")  
                 ls = sorted(os.listdir(cls_dir)) 
-                ls = ls[:len(ls) // 8]# 固定顺序选取一部分
+                ls = ls[:self.N_TRAIN]# 固定顺序选取一部分
                 sample_count[i] += len(ls)
                 for img_name in ls: ######## 尝试每个类别只用一小部分训练，降低计算量
                     self.samples.append((os.path.join(cls_dir, img_name), cls_idx))
             with open(sample_ind, mode = "w") as f:
                 csv.writer(f).writerows(self.samples)
-            plot = False
+            plot = True
             if plot:
                 plt.bar(self.classes, sample_count)
                 plt.savefig('train_samples.png', dpi=300, bbox_inches='tight')
@@ -83,7 +86,7 @@ class TinyImageNet(Dataset):
             for line in lines:
                 img, cls = line.split('\t')[:2]
                 self.class_to_img.setdefault(cls, []).append(img)
-            self.classes = sorted(list(self.class_to_img.keys()))
+            self.classes = sorted(list(self.class_to_img.keys()))[:self.N_CLASS] ##########
             self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
             # 200 classes, each 50 samples
             print('validation classes number:', len(self.classes))
@@ -91,9 +94,11 @@ class TinyImageNet(Dataset):
             
             
             self.samples = []
-            for cls, imgs in self.class_to_img.items():
+            for cls in self.classes:
+            #for cls, imgs in self.class_to_img.items():
+                imgs = self.class_to_img[cls]
                 # 每个类共50个样本，取按注释文件顺序的前12个样本，共2400个
-                for img in imgs[:12]:
+                for img in imgs[:self.N_VAL]:
                     sample_count[self.class_to_idx[cls]] += 1
                     self.samples.append((os.path.join(self.data_dir, img), self.class_to_idx[cls]))
             plot = True
@@ -126,6 +131,8 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args, logfile):
     total = 0 # 样本总数
     for i, (input, target) in enumerate(loader):
         # if i >= 0:
+            # break
+        
         # if epoch == 0:
             
             # break ############### for test
@@ -163,9 +170,12 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args, logfile):
     
     return OrderedDict(train_info_dict)
 def correct_topk(output, target, k = 1):
+    # 可能存在问题
     
-    predicted, _ = output.topk(k, dim = 1)
+    _, predicted = jittor.topk(output, k, dim = 1)
     correct = (predicted == target).sum().float().item()
+    # print(predicted.shape, target.shape, correct)
+    # print(predicted, target, correct)
     return correct
 def validate(epoch, model, loader, loss_fn, args, logfile):
     model.eval()
@@ -181,7 +191,7 @@ def validate(epoch, model, loader, loss_fn, args, logfile):
                 # print(i)
                 # continue
             output = model(input)
-            # print(output.shape)
+            # (output.shape)
             loss = loss_fn(output, target)
             losses_m += loss * input.size(0)
             total += input.size(0)
@@ -219,8 +229,8 @@ def main(args):
         root = '/mnt/d/data/tiny-imagenet-200',
         train = True,
         transform = Compose([
-            Resize(256),
-            RandomCrop(224),
+            Resize(64),
+            #RandomCrop(224),
             RandomHorizontalFlip(),  
             ToTensor(),
             custom_normalize
@@ -231,8 +241,8 @@ def main(args):
         root = '/mnt/d/data/tiny-imagenet-200',
         train = False,
         transform = Compose([
-            Resize(256),
-            CenterCrop(224),
+            Resize(64),
+            #CenterCrop(224),
             ToTensor(),
             custom_normalize
         ]) ######### 需要一致
@@ -240,7 +250,7 @@ def main(args):
     train_loader = train_dataset.set_attrs(batch_size = args.batch_size, shuffle = True) 
     val_loader = val_dataset.set_attrs(batch_size = args.batch_size, shuffle=False) #num_workers 有何作用？？？
     #model = models.overlock_xt()
-    model = models.overlock_xxt() ############
+    model = models.overlock_xxt(num_classes = TinyImageNet.N_CLASS) ############
     
     optimizer = jittor.optim.AdamW(model.parameters(), lr = 1e-3) ####### 仅作为测试
     train_loss_fn = nn.CrossEntropyLoss()

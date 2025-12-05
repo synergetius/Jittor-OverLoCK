@@ -357,7 +357,7 @@ class DynamicConvBlock(nn.Module):
         )
          
         self.weight_key = nn.Sequential(
-            nn.AdaptiveAvgPool2d(7),
+            nn.AdaptiveAvgPool2d(7), ######## 它处理小特征图可能有问题
             nn.Conv2d(ctx_dim, dim//2, kernel_size=1, bias=False),
             nn.BatchNorm2d(dim//2),
         )
@@ -541,6 +541,7 @@ class DynamicConvBlock(nn.Module):
         query, key = jittor.split(x_f, split_size=[C, C_h], dim=1)
         # 分别加工query和key
         query = self.weight_query(query) * self.scale
+        #print("!!!", key.shape, self.weight_key[0])
         key = self.weight_key(key) ## 这里面包含了adaptive pooling
         # 分组
         query = rearrange(query, 'b (g c) h w -> b g c (h w)', g=self.num_heads)
@@ -576,7 +577,9 @@ class DynamicConvBlock(nn.Module):
         x = rearrange(x, 'b g h w c -> b (g c) h w', h=H, w=W)
 
         if is_pad:
-            x = F.adaptive_avg_pool2d(x, input_resoltion)
+            self.adaptivePool = nn.AdaptiveAvgPool2d((input_resoltion[0], input_resoltion[1]))
+            #print(self.kernel_size, input_resoltion)
+            x = self.adaptivePool(x)
 
         x = self.dyconv_proj(x)
 
@@ -909,16 +912,26 @@ def overlock_xxt(pretrained=False, pretrained_cfg=None, **kwargs):
     适合移动端或边缘设备
     """
     model = OverLoCK(
+        # depth=[2, 2, 3, 2],           # 最小深度配置
+        # sub_depth=[6, 2],              # 最简动态块配置
+        # embed_dim=[12, 24, 48, 64],   # 极低通道数
+        # # embed_dim=[24, 48, 96, 128],   # 极低通道数 
+        # kernel_size=[13, 11, 9, 7],      # 更小的卷积核 
+        # #（kernel不能小于7x7，不然处理小特征图时，contimix中key的adaptive pooling会出错）
+        # mlp_ratio=[2, 2, 2, 2],        # 最小MLP扩展
+        # sub_num_heads=[1, 2],          # 最少注意力头
+        # sub_mlp_ratio=[2, 2],
+        # # projection=256,               # 极简分类头
+        # projection=128,               # 极简分类头
         depth=[1, 1, 1, 1],           # 最小深度配置
         sub_depth=[2, 1],              # 最简动态块配置
-        embed_dim=[12, 24, 48, 64],   # 极低通道数
+        embed_dim=[24, 48, 96, 128],   # 极低通道数
         # embed_dim=[24, 48, 96, 128],   # 极低通道数
-        kernel_size=[11, 9, 7, 5],      # 更小的卷积核
+        kernel_size=[13, 11, 9, 7],      # 更小的卷积核
         mlp_ratio=[2, 2, 2, 2],        # 最小MLP扩展
         sub_num_heads=[1, 2],          # 最少注意力头
         sub_mlp_ratio=[2, 2],
-        # projection=256,               # 极简分类头
-        projection=128,               # 极简分类头
+        projection=256,               # 极简分类头
         #use_checkpoint=[0, 0, 0, 0],
         **kwargs
     )
