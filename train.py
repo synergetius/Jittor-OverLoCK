@@ -250,14 +250,18 @@ def main(args):
     train_loader = train_dataset.set_attrs(batch_size = args.batch_size, shuffle = True) 
     val_loader = val_dataset.set_attrs(batch_size = args.batch_size, shuffle=False) #num_workers 有何作用？？？
     #model = models.overlock_xt()
-    model = models.overlock_xxt(num_classes = TinyImageNet.N_CLASS) ############
+    load_model = True
+    MODEL_PATH = "overlock.pkl"
+    model = models.overlock_xxt(num_classes = TinyImageNet.N_CLASS)
+    if load_model:
+        model.load_state_dict(jittor.load(MODEL_PATH))
     
     optimizer = jittor.optim.AdamW(model.parameters(), lr = 1e-3) ####### 仅作为测试
     train_loss_fn = nn.CrossEntropyLoss()
     validate_loss_fn = nn.CrossEntropyLoss()
     ############# test
-    start_epoch = 0
-    num_epochs = 10
+    start_epoch = 10 ########
+    num_epochs = 20 ########
     
     train_loss = []
     train_loss_aux = []
@@ -306,7 +310,7 @@ def main(args):
         "acc_top5":acc_top5
     }
     pd.DataFrame(log).to_csv("log.csv", index = False, header = True)
-    jittor.save(model.state_dict(), "overlock.pkl")
+    jittor.save(model.state_dict(), MODEL_PATH)
     logfile.close()
     # log.to_csv('log.csv', index = False, header = True)
 if __name__ == '__main__':
