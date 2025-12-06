@@ -8,13 +8,20 @@ from collections import OrderedDict
 from contextlib import suppress
 
 import torch
+import torch.nn.functional as F
+from torch import nn
 from torchvision.transforms import Compose, Resize, RandomCrop, CenterCrop, ToTensor, RandomHorizontalFlip
 import models_torch
 import matplotlib.pyplot as plt
 import matplotlib
+import numpy as np
+import pandas as pd
 matplotlib.use('Agg') 
 
 from torch.utils.data import Dataset, DataLoader
+from PIL import Image 
+
+device = torch.device("cuda")
 
 def get_args_parser():
     parser = argparse.ArgumentParser(description='Torch Training', add_help=False)
@@ -47,10 +54,7 @@ class TinyImageNet(Dataset):
             self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
             print(f"[DEBUG] 找到 {len(self.classes)} 个类别")  
             sample_ind = os.path.join(self.root, 'train_samples.csv')
-            # if os.path.isfile(sample_ind):
-                # with open(sample_ind, mode = "r") as f:
-                    # self.samples = [(path, int(cls_idx)) for path, cls_idx in csv.reader(f)]
-            # else:
+
             print('classes number:', len(self.classes))
             
             sample_count = np.zeros(len(self.classes))
@@ -64,8 +68,6 @@ class TinyImageNet(Dataset):
                 sample_count[i] += len(ls)
                 for img_name in ls: ######## 尝试每个类别只用一小部分训练，降低计算量
                     self.samples.append((os.path.join(cls_dir, img_name), cls_idx))
-            with open(sample_ind, mode = "w") as f:
-                csv.writer(f).writerows(self.samples)
             plot = True
             if plot:
                 plt.bar(self.classes, sample_count)
@@ -107,10 +109,10 @@ class TinyImageNet(Dataset):
                 # for img_name in self.img_to_class.keys()
                 # #if os.path.isfile(os.path.join(self.data_dir, img_name))
             # ]
-        self.set_attrs(total_len=len(self.samples))
         #self.set_attrs(total_len=len(self.samples), batch_size=128, shuffle=True)
 
-
+    def __len__(self):
+        return len(self.samples)
     def __getitem__(self, idx):
         
         img_path, label = self.samples[idx]
@@ -118,7 +120,7 @@ class TinyImageNet(Dataset):
         if self.transform:
             img = self.transform(img)
         # return img, label
-        return img, torch.int32(label)
+        return img.to(device), torch.tensor(label, dtype = torch.int64).to(device)
 def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args, logfile):
     model.train()
     total_batches = len(loader)
@@ -127,18 +129,24 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args, logfile):
     losses_aux_m = 0
     total = 0 # 样本总数
     for i, (input, target) in enumerate(loader):
-        # if i >= 0:
+        # if i >= 1:
             # break
         try:
+            optimizer.zero_grad() # 清零梯度
+            
             output = model(input)
             output_main = output['main']
             output_aux = output['aux']
             loss_main = loss_fn(output_main, target)
             loss_aux = loss_fn(output_aux, target)
             loss = loss_main + args.aux_loss_ratio * loss_aux
+            loss.backward()
+            
             losses_m += loss * input.size(0) #loss_fn默认对batch内所有样本取平均
             losses_aux_m += loss_aux * input.size(0)
-            optimizer.step(loss)
+            
+            optimizer.step()
+       
             print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}] Loss: {loss.item():.4f}")
             print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}] Loss: {loss.item():.4f}", file = logfile)
             total += input.size(0)
@@ -159,7 +167,8 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args, logfile):
     return OrderedDict(train_info_dict)
 def correct_topk(output, target, k = 1):
     _, predicted = torch.topk(output, k, dim = 1)
-    correct = (predicted == target).sum().float().item()
+    # print(predicted, target)
+    correct = (predicted == target.unsqueeze(-1)).sum().float().item()
     return correct
 def validate(epoch, model, loader, loss_fn, args, logfile):
     model.eval()
@@ -172,11 +181,13 @@ def validate(epoch, model, loader, loss_fn, args, logfile):
     with torch.no_grad():
         for i, (input, target) in enumerate(loader):
             # if i >= 1: #### for test
-                # print(i)
-                # continue
+                # break
             output = model(input)
-            # (output.shape)
-            loss = loss_fn(output, target)
+            #print(target)
+            tgt = F.one_hot(target, num_classes = TinyImageNet.N_CLASS).to(torch.float)
+            #print(target)
+            #print(output.shape, target.shape)
+            loss = loss_fn(output, tgt)
             losses_m += loss * input.size(0)
             total += input.size(0)
             correct_top1 += correct_topk(output, target, 1)
@@ -193,11 +204,11 @@ def validate(epoch, model, loader, loss_fn, args, logfile):
 
     return metrics
 def main(args):
-    device = torch.device("cuda")
+    
     logfile = open("log_torch.txt", "w")
     def custom_normalize(tensor):
-        mean = torch.array([0.485, 0.456, 0.406]).to(device).view(3,1,1)
-        std = torch.array([0.229, 0.224, 0.225]).to(device).view(3,1,1) ###### 这里执行通道维度转换
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(3,1,1) ###### 这里执行通道维度转换
         return (tensor - mean) / std
     
     train_dataset = TinyImageNet(
@@ -236,6 +247,7 @@ def main(args):
     ############# test
     start_epoch = 0 ########
     num_epochs = 20 ########
+    # num_epochs = 1 ########
     
     train_loss = []
     train_loss_aux = []
@@ -284,7 +296,7 @@ def main(args):
         "acc_top5":acc_top5
     }
     pd.DataFrame(log).to_csv("log_torch.csv", index = False, header = True)
-    jittor.save(model.state_dict(), MODEL_PATH)
+    torch.save(model.state_dict(), MODEL_PATH)
     logfile.close()
 if __name__ == '__main__':
     args = get_args_parser().parse_args()

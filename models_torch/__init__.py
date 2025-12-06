@@ -1,1 +1,1 @@
-from .overlock import overlock_xt, overlock_t, overlock_s, overlock_b
+from .overlock import overlock_xt, overlock_t, overlock_s, overlock_b, overlock_xxt
