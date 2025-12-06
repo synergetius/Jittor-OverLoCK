@@ -43,5 +43,5 @@ pip install mmengine==0.2.0
 
 使用`plot.py`程序根据两个版本的测试结果（`log.csv`和`log_torch.csv`）绘制训练时损失函数和分类精度的变化曲线。
 
-详细的训练日志见`log.txt`和`log_torch.csv`。
+详细的训练日志见`log.txt`和`log_torch.txt`。
 
