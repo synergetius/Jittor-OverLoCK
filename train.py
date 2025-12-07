@@ -70,7 +70,7 @@ class TinyImageNet(Dataset):
                     self.samples.append((os.path.join(cls_dir, img_name), cls_idx))
             with open(sample_ind, mode = "w") as f:
                 csv.writer(f).writerows(self.samples)
-            plot = True
+            plot = False
             if plot:
                 plt.bar(self.classes, sample_count)
                 plt.savefig('train_samples.png', dpi=300, bbox_inches='tight')
@@ -102,7 +102,7 @@ class TinyImageNet(Dataset):
                 for img in imgs[:self.N_VAL]:
                     sample_count[self.class_to_idx[cls]] += 1
                     self.samples.append((os.path.join(self.data_dir, img), self.class_to_idx[cls]))
-            plot = True
+            plot = False
             if plot:
                 plt.bar(self.classes, sample_count)
                 plt.savefig('val_samples.png', dpi=300, bbox_inches='tight')

@@ -68,7 +68,7 @@ class TinyImageNet(Dataset):
                 sample_count[i] += len(ls)
                 for img_name in ls: ######## 尝试每个类别只用一小部分训练，降低计算量
                     self.samples.append((os.path.join(cls_dir, img_name), cls_idx))
-            plot = True
+            plot = False
             if plot:
                 plt.bar(self.classes, sample_count)
                 plt.savefig('train_samples.png', dpi=300, bbox_inches='tight')
@@ -100,7 +100,7 @@ class TinyImageNet(Dataset):
                 for img in imgs[:self.N_VAL]:
                     sample_count[self.class_to_idx[cls]] += 1
                     self.samples.append((os.path.join(self.data_dir, img), self.class_to_idx[cls]))
-            plot = True
+            plot = False
             if plot:
                 plt.bar(self.classes, sample_count)
                 plt.savefig('val_samples.png', dpi=300, bbox_inches='tight')
