@@ -590,11 +590,11 @@ if __name__ == '__main__':
 
 ![training_metrics](training_metrics.png)
 
-训练损失由主损失和辅助损失（均为交叉熵损失）相加得到，$ L=L _{main}+\alpha L _{aux} $，其中根据OverLoCK原版实现取$ \alpha=0.4 $。
+训练损失由主损失和辅助损失（均为交叉熵损失）相加得到，L = L(main) + α * L(aux)，其中根据OverLoCK原版实现取α=0.4。
 
-在图中可看到，辅助损失$ L _{aux} $在两个版本的实现中的变化是高度一致的，这是因为它是经过OverLoCK模型中Base-net和Overview-net计算得到的结果，这两个子网络中模块的Jittor实现与PyTorch实现完全相同。
+在图中可看到，辅助损失（Auxiliary Loss）在两个版本的实现中的变化是高度一致的，这是因为它是经过OverLoCK模型中Base-net和Overview-net计算得到的结果，这两个子网络中模块的Jittor实现与PyTorch实现完全相同。
 
-然而主损失$ L _{main} $的两个版本的实现差异较大。在第二张图（Main Loss）中，实线代表两个版本在训练时的主损失，虚线代表验证集上计算得到的损失（根据原版OverLoCK实现，验证时仅以Focus-net的输出计算主损失，无辅助损失）。从epoch 10开始，PyTorch版本的训练验证损失与训练主损失差距显著增大，造成明显的过拟合；Jittor版本则尚未出现过拟合，但损失下降速度明显比PyTorch版本更慢。由于时间限制，没有继续训练，但推测其损失会继续下降。
+然而主损失的两个版本的实现差异较大。在第二张图（Main Loss）中，实线代表两个版本在训练时的主损失，虚线代表验证集上计算得到的损失（根据原版OverLoCK实现，验证时仅以Focus-net的输出计算主损失，无辅助损失）。从epoch 10开始，PyTorch版本的训练验证损失与训练主损失差距显著增大，造成明显的过拟合；Jittor版本则尚未出现过拟合，但损失下降速度明显比PyTorch版本更慢。由于时间限制，没有继续训练，但推测其损失会继续下降。
 
 分析：问题的关键在于Dynamic Block中使用的`na2d_av`算子的复现不够精确。OverLoCK模型中使用的`na2d_av`算子源自[Neighborhood Attention Transformer](https://github.com/SHI-Labs/Neighborhood-Attention-Transformer)的研究。原版OverLoCK实现使用的`na2d_av`算子来自第三方库NATTEN，它在NAT的研究基础上基于C++和CUDA做了高性能的底层实现。但由于实现过于复杂，本实验在编写Jittor版本时只根据NAT论文中的说明实现了朴素的邻域注意力计算，这可能使得计算原理上与NATTEN差异较大，导致表示能力弱于原版；即使有部分等价的计算效果，也可能因为与高度优化的计算图不一致而造成训练过程中优化问题地形的不同，收敛速度更慢。
 
