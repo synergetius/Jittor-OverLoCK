@@ -31,9 +31,33 @@ pip install mmengine==0.2.0
 
 由于`https://shi-labs.com/natten/wheels/`网络连接不佳，建议手动下载`natten`的`.whl`文件。
 
+
+
+## 模型
+
+由于计算资源有限，使用了一个比OverLoCK-XT更小规模的模型OverLoCK-XXT进行训练，参数配置如下：
+
+```python
+model = OverLoCK(
+    depth = [1, 1, 2, 1],         
+    sub_depth = [3, 1],              
+    embed_dim = [24, 48, 96, 128],   
+    kernel_size = [13, 11, 9, 7],      
+    mlp_ratio = [2, 2, 2, 2],        
+    sub_num_heads = [1, 2],          
+    sub_mlp_ratio = [2, 2],
+    projection = 256,               
+    **kwargs
+)
+```
+
+
+
 ## 数据集
 
 采用TinyImagenet数据集，它包含200个类别，训练集每个类别有500张图像，验证集每个类别有50张图像，尺寸均为64x64。由于计算资源和时间的限制，将类别序号按字典序排序后选出前20个类别进行训练和测试。
+
+
 
 ## 训练和测试
 
