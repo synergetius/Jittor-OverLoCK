@@ -160,7 +160,6 @@ class GRN(nn.Module):
     This implementation is more efficient than the original (https://github.com/facebookresearch/ConvNeXt-V2)
     We assume the inputs to this layer are (N, C, H, W)
     """
-    # ConvFFN中的归一化模块，可以了解一下具体的原理
     def __init__(self, dim, use_bias=True):
         super().__init__()
         self.use_bias = use_bias
@@ -281,7 +280,6 @@ class ResDWConv(nn.Conv2d):
     '''
     Depthwise convolution with residual connection
     '''
-    # 一个加了残差连接的深度卷积（从groups=dim可以看出是每个通道独立计算的）
     def __init__(self, dim, kernel_size=3):
         super().__init__(dim, dim, kernel_size=kernel_size, padding=kernel_size//2, groups=dim)
     
@@ -291,7 +289,7 @@ class ResDWConv(nn.Conv2d):
 
 
 class RepConvBlock(nn.Module):
-    # 对应于论文中的Basic Block
+
     def __init__(self, 
                  dim=64,
                  kernel_size=7,
@@ -317,7 +315,6 @@ class RepConvBlock(nn.Module):
             DilatedReparamBlock(dim, kernel_size=kernel_size, deploy=deploy, use_sync_bn=False, attempt_use_lk_impl=use_gemm),
             nn.BatchNorm2d(dim),
             SEModule(dim),
-            #### 这一部分是ConvFFN的结构
             nn.Conv2d(dim, mlp_dim, kernel_size=1),
             nn.GELU(),
             ResDWConv(mlp_dim, kernel_size=3),
@@ -332,7 +329,6 @@ class RepConvBlock(nn.Module):
     def forward_features(self, x):
         
         x = self.dwconv(x)
-        # 应该是残差连接与layerscale的两种不同的组合方式
         if self.res_scale: 
             x = self.ls(x) + self.proj(x)
         else:
@@ -342,7 +338,6 @@ class RepConvBlock(nn.Module):
         return x
     
     def forward(self, x):
-        # 加了断点，应该是为了调试方便
         if self.use_checkpoint and x.requires_grad:
             x = checkpoint(self.forward_features, x, use_reentrant=False)
         else:
@@ -609,7 +604,7 @@ class OverLoCK(nn.Module):
  
         super().__init__()
         
-        fusion_dim = embed_dim[-1] + embed_dim[-1]//4 # 融合的特征通道数
+        fusion_dim = embed_dim[-1] + embed_dim[-1]//4 
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim
 
@@ -628,7 +623,6 @@ class OverLoCK(nn.Module):
         self.blocks4 = nn.ModuleList()
         self.sub_blocks3 = nn.ModuleList()
         self.sub_blocks4 = nn.ModuleList()
-        # depth 应该是四个阶段每个阶段使用的blocks的数量
         for i in range(depth[0]):
             self.blocks1.append(
                 RepConvBlock(
@@ -677,7 +671,7 @@ class OverLoCK(nn.Module):
                 )
             )
 
-        for i in range(depth[3]): # 第四个阶段应该是overview-net中的blocks
+        for i in range(depth[3]): 
             self.blocks4.append(
                 RepConvBlock(
                     dim=embed_dim[3],
@@ -692,7 +686,6 @@ class OverLoCK(nn.Module):
                     use_checkpoint=(i<use_checkpoint[3]),
                 )
             )
-        # focus-net的动态块的堆叠。sub_depth就是对应的堆叠blocks数量
         for i in range(sub_depth[0]):
             self.sub_blocks3.append(
                 DynamicConvBlock(
@@ -737,7 +730,7 @@ class OverLoCK(nn.Module):
             )
 
         # Aux Cls Head
-        # 这个辅助分类头应该是图像分类预训练时接在overviewnet后的
+        
         if use_ds:
             self.aux_head = nn.Sequential(
                 nn.BatchNorm2d(embed_dim[-1]),
@@ -746,7 +739,7 @@ class OverLoCK(nn.Module):
             )
         
         # Main Cls Head
-        # 主要的分类头，应该是接在focus-net后的
+        
         self.head = nn.Sequential(
             nn.Conv2d(fusion_dim, projection, kernel_size=1, bias=False),
             nn.BatchNorm2d(projection),
@@ -775,7 +768,7 @@ class OverLoCK(nn.Module):
                 m.merge_dilated_branches()
             
     def forward_pre_features(self, x):
-        # 1,2阶段的计算
+     
         x = self.patch_embed1(x)
         for blk in self.blocks1:
             x = blk(x)
@@ -788,7 +781,7 @@ class OverLoCK(nn.Module):
     
     
     def forward_base_features(self, x):
-        #3, 4阶段的计算
+       
         x = self.patch_embed3(x)
         for blk in self.blocks3:
             x = blk(x)
@@ -802,13 +795,10 @@ class OverLoCK(nn.Module):
 
     def forward_sub_features(self, x, ctx):
 
-        ctx_cls = ctx # 是overviewnet输出的1/32的小特征图
+        ctx_cls = ctx 
         ctx_ori = self.high_level_proj(ctx) 
-        #ctx_ori的计算：压缩通道数量到原来的1/4，
-        # 这样就可以直接拼接到第二个dynamic blocks阶段（图中弯曲长红线）,即self.sub_blocks4
         ctx_up = F.interpolate(ctx_ori, size=x.shape[2:], mode='bilinear', align_corners=False)
-        # ctx_up对ctx_ori进行了上采样，恢复到1/16尺寸的特征图（与basenet输出尺寸对齐），
-        # 这样可以通过图中短直红线注入第一个dynamic blocks阶段 （self.sub_blocks3）
+
         for idx, blk in enumerate(self.sub_blocks3):
             if idx == 0:
                 ctx = ctx_up
@@ -818,28 +808,25 @@ class OverLoCK(nn.Module):
         for idx, blk in enumerate(self.sub_blocks4):
             x, ctx = blk(x, ctx, ctx_ori)
         
-        return (x, ctx_cls) # 这里返回的ctx_cls是overview得到的原始的上下文信息，未经过focus-net加工
+        return (x, ctx_cls) 
 
     def forward_features(self, x):
-        #  主要的特征计算过程都在这了
-        x = self.forward_pre_features(x) #1, 2阶段的计算
-        x, ctx = self.forward_base_features(x) # 3, 4阶段的计算（包括basenet的最后部分和overviewnet的计算）
-        # 从图中可以看出，第三阶段的输出就是basenet输出的base_feature，即x
-        # 第四阶段的输出是在base_feature上加工得到的context guidance，即ctx
-        x, ctx_cls = self.forward_sub_features(x, ctx) # focus-net的计算
+        x = self.forward_pre_features(x) 
+        x, ctx = self.forward_base_features(x) 
+        x, ctx_cls = self.forward_sub_features(x, ctx) 
 
         return (x, ctx_cls)
 
     def forward(self, x):
         
         x, ctx = self.forward_features(x)
-        x = self.head(x).flatten(1) #main 分类头计算
+        x = self.head(x).flatten(1) 
 
-        if hasattr(self, 'aux_head') and self.training: #预训练时使用辅助分类头
-            ctx = self.aux_head(ctx).flatten(1) # 这里用于aux_head计算的ctx是overview-net输出的原始上下文信息
+        if hasattr(self, 'aux_head') and self.training: 
+            ctx = self.aux_head(ctx).flatten(1) 
             return dict(main=x, aux=ctx)
         
-        return x # 验证/测试时仅考虑focusnet的输出结果
+        return x 
 
 
 def _cfg(url=None, **kwargs):
@@ -880,24 +867,22 @@ def overlock_xt(pretrained=False, pretrained_cfg=None, **kwargs):
 @register_model
 def overlock_xxt(pretrained=False, pretrained_cfg=None, **kwargs):
 
-    ############## log-2 configs
+
     model = OverLoCK(
-        depth=[1, 1, 2, 1],           # 最小深度配置
-        sub_depth=[3, 1],              # 最简动态块配置
-        embed_dim=[24, 48, 96, 128],   # 极低通道数
-        kernel_size=[13, 11, 9, 7],      # 更小的卷积核
-        mlp_ratio=[2, 2, 2, 2],        # 最小MLP扩展
-        sub_num_heads=[1, 2],          # 最少注意力头
+        depth=[1, 1, 2, 1],         
+        sub_depth=[3, 1],              
+        embed_dim=[24, 48, 96, 128],   
+        kernel_size=[13, 11, 9, 7],      
+        mlp_ratio=[2, 2, 2, 2],        
+        sub_num_heads=[1, 2],          
         sub_mlp_ratio=[2, 2],
-        projection=256,               # 极简分类头
+        projection=256,               
         **kwargs
     )
 
     model.default_cfg = _cfg(crop_pct=0.925)
 
-    if pretrained:
-        pretrained = 'https://github.com/LMMMEng/OverLoCK/releases/download/v1/overlock_xt_in1k_224.pth'
-        load_checkpoint(model, pretrained)
+
 
     return model
 

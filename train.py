@@ -23,14 +23,14 @@ from PIL import Image
 def get_args_parser():
     parser = argparse.ArgumentParser(description='Jittor Training', add_help=False)
     parser.add_argument('-b', '--batch-size', type=int, default=64, metavar='N',
-                        help='input batch size for training (default: 64)') ############### 暂时修改，测试存储分配问题
+                        help='input batch size for training (default: 64)') 
     parser.add_argument('--aux-loss-ratio', type=float, default=0.4,
                         help='Aux loss weight')
     return parser
 class TinyImageNet(Dataset):
-    N_CLASS = 20 # 选择的类别数（按编号字典序）
-    N_TRAIN = 500 # 每个类别的训练样本数（TinyImageNet数据集每个类别总共有500个）
-    N_VAL = 50 # 每个类别的验证样本数（TinyImageNet总共只有50个）
+    N_CLASS = 20
+    N_TRAIN = 500 
+    N_VAL = 50 
     def __init__(self, root, train=True, transform=None, debug=False):
         super().__init__()
         self.root = root
@@ -51,10 +51,6 @@ class TinyImageNet(Dataset):
             self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
             print(f"[DEBUG] 找到 {len(self.classes)} 个类别")  
             sample_ind = os.path.join(self.root, 'train_samples.csv')
-            # if os.path.isfile(sample_ind):
-                # with open(sample_ind, mode = "r") as f:
-                    # self.samples = [(path, int(cls_idx)) for path, cls_idx in csv.reader(f)]
-            # else:
             print('classes number:', len(self.classes))
             
             sample_count = np.zeros(len(self.classes))
@@ -62,11 +58,10 @@ class TinyImageNet(Dataset):
             for i, cls in enumerate(self.classes):
                 cls_dir = os.path.join(self.data_dir, cls, 'images')
                 cls_idx = self.class_to_idx[cls]
-                #print(f"[DEBUG] 开始扫描类别 {cls} ")  
                 ls = sorted(os.listdir(cls_dir)) 
-                ls = ls[:self.N_TRAIN]# 固定顺序选取一部分
+                ls = ls[:self.N_TRAIN]
                 sample_count[i] += len(ls)
-                for img_name in ls: ######## 尝试每个类别只用一小部分训练，降低计算量
+                for img_name in ls: 
                     self.samples.append((os.path.join(cls_dir, img_name), cls_idx))
             with open(sample_ind, mode = "w") as f:
                 csv.writer(f).writerows(self.samples)
@@ -74,31 +69,25 @@ class TinyImageNet(Dataset):
             if plot:
                 plt.bar(self.classes, sample_count)
                 plt.savefig('train_samples.png', dpi=300, bbox_inches='tight')
-                # 200个类别样本数量是均匀的
                 
         else:
             print(f"[DEBUG] 开始读取验证集注释文件: {self.annotation_file}")  
             with open(self.annotation_file, 'r') as f:
                 lines = f.readlines()
-            #lines = lines[:len(lines) // 8] ####### 只取（按注释文件顺序的）一小部分作为验证集
-            # self.img_to_class = {line.split('\t')[0]: line.split('\t')[1] for line in lines}
             self.class_to_img = {}
             for line in lines:
                 img, cls = line.split('\t')[:2]
                 self.class_to_img.setdefault(cls, []).append(img)
             
-            self.classes = sorted(list(self.class_to_img.keys()))[:self.N_CLASS] ##########
+            self.classes = sorted(list(self.class_to_img.keys()))[:self.N_CLASS] 
             self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
-            # 200 classes, each 50 samples
             print('validation classes number:', len(self.classes))
             sample_count = np.zeros(len(self.classes))
             
             
             self.samples = []
             for cls in self.classes:
-            #for cls, imgs in self.class_to_img.items():
                 imgs = self.class_to_img[cls]
-                # 每个类共50个样本，按注释文件顺序，取前面的一部分
                 for img in imgs[:self.N_VAL]:
                     sample_count[self.class_to_idx[cls]] += 1
                     self.samples.append((os.path.join(self.data_dir, img), self.class_to_idx[cls]))
@@ -106,13 +95,7 @@ class TinyImageNet(Dataset):
             if plot:
                 plt.bar(self.classes, sample_count)
                 plt.savefig('val_samples.png', dpi=300, bbox_inches='tight')
-            # self.samples = [
-                # (os.path.join(self.data_dir, img_name), self.class_to_idx[self.img_to_class[img_name]])
-                # for img_name in self.img_to_class.keys()
-                # #if os.path.isfile(os.path.join(self.data_dir, img_name))
-            # ]
         self.set_attrs(total_len=len(self.samples))
-        #self.set_attrs(total_len=len(self.samples), batch_size=128, shuffle=True)
 
 
     def __getitem__(self, idx):
@@ -121,7 +104,6 @@ class TinyImageNet(Dataset):
         img = Image.open(img_path).convert('RGB')
         if self.transform:
             img = self.transform(img)
-        # return img, label
         return img, jittor.int32(label)
 def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args, logfile):
     model.train()
@@ -129,15 +111,8 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args, logfile):
     time0 = time.time()
     losses_m = 0
     losses_aux_m = 0
-    total = 0 # 样本总数
+    total = 0 
     for i, (input, target) in enumerate(loader):
-        # if i >= 0:
-            # break
-        
-        # if epoch == 0:
-            
-            # break ############### for test
-     
         try:
             output = model(input)
             output_main = output['main']
@@ -145,11 +120,9 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args, logfile):
             loss_main = loss_fn(output_main, target)
             loss_aux = loss_fn(output_aux, target)
             loss = loss_main + args.aux_loss_ratio * loss_aux
-            losses_m += loss * input.size(0) #loss_fn默认对batch内所有样本取平均
+            losses_m += loss * input.size(0) 
             losses_aux_m += loss_aux * input.size(0)
             optimizer.step(loss)
-            #print(loss)
-            #print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}]")
             print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}] Loss: {loss.item():.4f}")
             print(f"[Epoch {epoch+1} | Batch {i+1}/{total_batches}] Loss: {loss.item():.4f}", file = logfile)
             total += input.size(0)
@@ -173,24 +146,17 @@ def train_one_epoch(epoch, model, loader, optimizer, loss_fn, args, logfile):
 def correct_topk(output, target, k = 1):
     _, predicted = jittor.topk(output, k, dim = 1)
     correct = (predicted == target).sum().float().item()
-    # print(predicted.shape, target.shape, correct)
-    # print(predicted, target, correct)
     return correct
 def validate(epoch, model, loader, loss_fn, args, logfile):
     model.eval()
     correct_top1 = 0
     correct_top5 = 0
     total_batches = len(loader)
-    # print(total_batches)
     losses_m = 0
     total = 0
     with jittor.no_grad():
         for i, (input, target) in enumerate(loader):
-            # if i >= 1: #### for test
-                # print(i)
-                # continue
             output = model(input)
-            # (output.shape)
             loss = loss_fn(output, target)
             losses_m += loss * input.size(0)
             total += input.size(0)
@@ -208,20 +174,13 @@ def validate(epoch, model, loader, loss_fn, args, logfile):
 
     return metrics
 def main(args):
-    
-    # os.environ['JT_SYNC'] = '1'
-    # os.environ['trace_py_var'] = '3' 
-    # os.environ['JT_LOG'] = '1'
-    # os.environ['JT_SAVE_MEM'] = '1'
-    # os.environ['JT_OPT_LEVEL'] = '0'
     jittor.flags.use_cuda = 1
     jittor.flags.log_silent = 0
     jittor.flags.log_v = 1
     logfile = open("log.txt", "w")
-    #jittor.flags.lazy_execution = 0
     def custom_normalize(tensor):
         mean = jittor.array([0.485, 0.456, 0.406]).view(3,1,1)
-        std = jittor.array([0.229, 0.224, 0.225]).view(3,1,1) ###### 这里执行通道维度转换
+        std = jittor.array([0.229, 0.224, 0.225]).view(3,1,1)
         return (tensor - mean) / std
     
     train_dataset = TinyImageNet(
@@ -229,7 +188,6 @@ def main(args):
         train = True,
         transform = Compose([
             Resize(64),
-            #RandomCrop(224),
             RandomHorizontalFlip(),  
             ToTensor(),
             custom_normalize
@@ -241,26 +199,23 @@ def main(args):
         train = False,
         transform = Compose([
             Resize(64),
-            #CenterCrop(224),
             ToTensor(),
             custom_normalize
-        ]) ######### 需要一致
+        ]) 
     )
     train_loader = train_dataset.set_attrs(batch_size = args.batch_size, shuffle = True) 
-    val_loader = val_dataset.set_attrs(batch_size = args.batch_size, shuffle=False) #num_workers 有何作用？？？
-    #model = models.overlock_xt()
-    load_model = True
+    val_loader = val_dataset.set_attrs(batch_size = args.batch_size, shuffle=False) 
+    load_model = False
     MODEL_PATH = "overlock.pkl"
     model = models.overlock_xxt(num_classes = TinyImageNet.N_CLASS)
     if load_model:
         model.load_state_dict(jittor.load(MODEL_PATH))
     
-    optimizer = jittor.optim.AdamW(model.parameters(), lr = 1e-3) ####### 仅作为测试
+    optimizer = jittor.optim.AdamW(model.parameters(), lr = 1e-3) 
     train_loss_fn = nn.CrossEntropyLoss()
     validate_loss_fn = nn.CrossEntropyLoss()
-    ############# test
-    start_epoch = 10 ########
-    num_epochs = 20 ########
+    start_epoch = 0 
+    num_epochs = 20 
     
     train_loss = []
     train_loss_aux = []
@@ -293,13 +248,6 @@ def main(args):
             print(f"{key}: {value}", file = logfile)
         print("]")
         print("]", file = logfile)
-    # log = pd.DataFrame({
-        # "train_loss":train_loss, 
-        # "train_loss_aux":train_loss_aux,
-        # "val_loss":val_loss,
-        # "acc_top1":acc_top1,
-        # "acc_top5":acc_top5
-    # })
     log = {
         "train_loss":train_loss, 
         "train_loss_aux":train_loss_aux,
@@ -311,7 +259,6 @@ def main(args):
     pd.DataFrame(log).to_csv("log.csv", index = False, header = True)
     jittor.save(model.state_dict(), MODEL_PATH)
     logfile.close()
-    # log.to_csv('log.csv', index = False, header = True)
 if __name__ == '__main__':
     args = get_args_parser().parse_args()
     main(args)
