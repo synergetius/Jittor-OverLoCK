@@ -126,9 +126,9 @@ python erf_torch.py
 
 所得结果如下（第一行为Jittor，第二行为PyTorch，分别为第1,2阶段（basenet）与第3,4阶段（focusnet）末尾输出的中心位置神经元对应的输入图像上的梯度平均图，各处亮度表示输出对该处输入的梯度绝对值大小）。
 
-![jittor_erf](visualization\jittor_erf.png)
+![jittor_erf](./visualization/jittor_erf.png)
 
-![torch_erf](visualization\torch_erf.png)
+![torch_erf](./visualization/torch_erf.png)
 
 分析：
 
@@ -136,6 +136,8 @@ python erf_torch.py
 - Jittor与PyTorch版本还存在一定的差异：Jittor版本的亮斑更加地扩散、在3,4阶段的颜色更均匀，而PyTorch版本则更加集中。这与精度曲线中呈现的模型训练到的程度有一定关联：模型权重随机初始化，在训练开始时是充满噪声的，而在训练的过程中噪声逐渐由信息取代，Jittor的训练尚未达到最佳精度，处于欠拟合状态，而PyTorch的训练已经得到了充分的训练甚至于过拟合了，因而它对于最相关的局部的信息的利用最多，其梯度更大。
 
 基于梯度的类别激活图（GradCAM）。
+
+
 
 详细的训练日志见`log.txt`和`log_torch.txt`。
 
