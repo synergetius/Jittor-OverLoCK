@@ -112,9 +112,9 @@ Jittor训练总时长为259.2 min，PyTorch训练总时长为117.2 min，前者�
 
 **可视化分析**：
 
-有效感受野（Effective Reptive Field, ERF）。
+**有效感受野**（Effective Reptive Field, ERF）。
 
-根据[ERF的研究文章](https://arxiv.org/abs/1701.04128)，编写了有效感受野可视化的程序，分别在两个环境运行以下脚本：
+根据[ERF的研究文章](https://arxiv.org/abs/1701.04128)，编写了有效感受野可视化的程序。分别在两个环境运行以下脚本：
 
 ```bash
 python erf.py
@@ -124,7 +124,7 @@ python erf.py
 python erf_torch.py
 ```
 
-所得结果如下（第一行为Jittor，第二行为PyTorch，分别为第1,2阶段（basenet）与第3,4阶段（focusnet）末尾输出的中心位置神经元对应的输入图像上的梯度平均图，各处亮度表示输出对该处输入的梯度绝对值大小）。
+得到的结果保存在`visualization`目录下（如下图，第一行为Jittor，第二行为PyTorch，分别为第1,2阶段（basenet）与第3,4阶段（focusnet）末尾输出的中心位置神经元对应的输入图像上的梯度平均图，各处亮度表示输出对该处输入的梯度绝对值大小）：
 
 ![jittor_erf](./visualization/jittor_erf.png)
 
@@ -135,9 +135,35 @@ python erf_torch.py
 - 整体上，可以看出，Jittor与PyTorch版本的可视化呈现出相似的模式，即阶段越靠后，有效感受野（图中明显更亮的部分）越大；第1,2阶段的亮斑局限在有限的范围内，而在第3,4阶段，除了中心有明显的亮斑以外，整张图片上都有更均匀分布的更亮的颜色。这是因为第3,4阶段中采用的ContMix模块将像素与全局的空间区域的注意力引入了卷积的计算，这使得中心神经元能够根据全局各处的输入计算其输出。
 - Jittor与PyTorch版本还存在一定的差异：Jittor版本的亮斑更加地扩散、在3,4阶段的颜色更均匀，而PyTorch版本则更加集中。这与精度曲线中呈现的模型训练到的程度有一定关联：模型权重随机初始化，在训练开始时是充满噪声的，而在训练的过程中噪声逐渐由信息取代，Jittor的训练尚未达到最佳精度，处于欠拟合状态，而PyTorch的训练已经得到了充分的训练甚至于过拟合了，因而它对于最相关的局部的信息的利用最多，其梯度更大。
 
-基于梯度的类别激活图（GradCAM）。
+**基于梯度的类别激活图**（GradCAM）。
 
+根据[类别激活图的研究文章](https://arxiv.org/abs/1701.04128)及参考一篇文章的代码实现（https://zhuanlan.zhihu.com/p/479485138），编写了OverLoCK模型的GradCAM可视化程序。分别在两个环境运行以下脚本：
 
+```bash
+python gradcam.py
+```
+
+```bash
+python gradcam_torch.py
+```
+
+得到的结果保存在`visualization`目录下，文件名中的`True`和`False`表示该样本是否正确分类，热力图显示的是ground-truth类别对应的激活图，每张图包括一张输入图像及按顺序在输入图像上显示的四个阶段末尾输出对应的类别激活图。由于输入图像较小，第3,4阶段末输出的特征图分别只有4x4和2x2尺寸，只保留了较少的空间信息，所以应主要根据第1,2阶段的激活图进行分析。
+
+例如，序号为400的图像是一只蜘蛛，如下第一行为Jittor，第二行为PyTorch：
+
+![jittor_cam_400_True](./visualization/jittor_cam_400_True.png)
+
+![torch_cam_400_True](./visualization/torch_cam_400_True.png)
+
+可以看出，虽然两个版本类别激活图中激活值有不同的分布，但是两者都关注到了蜘蛛有多条腿这一明显的特征（尤其在第1,2阶段中腿部被红色覆盖），都得到了正确的分类。
+
+而对于未正确分类的样本，也可以从可视化中分析出一些原因：
+
+![jittor_cam_550_False](./visualization/jittor_cam_550_False.png)
+
+![torch_cam_550_False](./visualization/torch_cam_550_False.png)
+
+在这张禽类样本上，Jittor模型第1,2阶段中的激活图中区别于背景的部分是位于禽类颈部的圈，它接近了决定物体类别的重要特征，但是未凸显其完整部分，是因为欠拟合而没有作出正确的判断；PyTorch模型虽然在第2阶段找到了较完整的头部与颈部，但从1,2阶段的激活图可以看出，它过多关注了背景地面上的两条白色条纹，引入了无关信息，导致特征质量下降，造成针对前景显著物体分类的错误，这反映出它存在的过拟合问题，与精度曲线的状况是一致的。
 
 详细的训练日志见`log.txt`和`log_torch.txt`。
 
